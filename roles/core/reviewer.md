@@ -81,26 +81,26 @@ bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
 
 ### 6. Advance to QA (pipeline sessions only)
 
-When the verdict is `PASS` and there is no orchestrator, forward the work
-to QA yourself — the orchestrator is the one who would normally do this,
-so in an orchestrator-less pipeline you own the handoff.
+Run this block **only when your verdict is `PASS`**. If the verdict is
+`PARTIAL` or `FAIL`, the coder must address the findings first — do not
+forward to QA until the code is approved.
 
 ```bash
 ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
-QA=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role qa | head -1)
+QA=$(bash "$ORCHESTRATION_HOME/lib/roster.sh"   find-role qa           | head -1)
 
-if [[ -z "$ORCH" && -n "$QA" && "<verdict>" == "PASS" ]]; then
+if [[ -z "$ORCH" && -n "$QA" ]]; then
+  # No orchestrator in this session — you own the handoff to QA.
   bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$QA" TASK \
-    "Code review passed for task <id>. Please verify in the real environment.
+    "Code review PASS for task <id>. Please verify in the real environment.
 Files changed: <list>
 What to verify: <expected behaviour, pass criteria>
 Contract: .agents/contracts/<name>.md" \
     --from <your_id>
 fi
+# If an orchestrator is present, stop here — they handle QA assignment
+# after receiving your VERDICT message above.
 ```
-
-If there is an orchestrator, skip this — the orchestrator handles QA
-assignment after receiving your verdict.
 
 ## Verdict Guidelines
 
