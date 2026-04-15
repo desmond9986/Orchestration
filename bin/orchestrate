@@ -3,7 +3,8 @@
 #
 # Usage:
 #   orchestrate <pattern> [pattern-args...]
-#   orchestrate list                    # list available patterns
+#   orchestrate recommend               # answer questions, get a pattern recommendation
+#   orchestrate list                    # list available patterns with descriptions
 #   orchestrate --help
 #
 # Flags (must come before the pattern name):
@@ -12,6 +13,7 @@
 #                                  (claude --dangerously-skip-permissions, codex --yolo)
 #
 # Examples:
+#   orchestrate recommend               # not sure which pattern? answer a few questions
 #   orchestrate lean
 #   orchestrate --yolo lean             # skip prompts, use defaults
 #   orchestrate swarm 4                 # swarm with 4 coders
@@ -43,15 +45,92 @@ usage() {
 
 YOLO=0
 
+# ── recommend ─────────────────────────────────────────────────────────────
+# Walk the decision tree as y/n questions and print the recommended pattern.
+cmd_recommend() {
+  # yn <question>  — returns 0 for yes, 1 for no
+  # Tries /dev/tty first (interactive terminal), falls back to stdin silently.
+  yn() {
+    local ans=""
+    printf "  %s [y/N]: " "$1"
+    { read -r ans </dev/tty; } 2>/dev/null \
+      || read -r ans 2>/dev/null \
+      || ans=""
+    case "$ans" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+  }
+
+  recommend() {  # pattern reason
+    printf "\n\033[1mRecommended: %s\033[0m\n" "$1"
+    printf "  %s\n\n" "$2"
+    printf "  Run: orchestrate %s\n\n" "$1"
+  }
+
+  printf "\n\033[1m[orchestrate] Pattern recommender\033[0m\n"
+  printf "  Answer a few questions (Enter = no).\n\n"
+
+  if yn "Is this a quick, self-contained fix (bug, small change)?"; then
+    recommend "lonely-coder" \
+      "One agent covers everything. Fastest and cheapest for focused work."
+    return
+  fi
+
+  if yn "Is this exploratory — you don't yet know what to build or how?"; then
+    recommend "spike" \
+      "Researcher maps the codebase, architect produces a design doc. No code written yet."
+    return
+  fi
+
+  if yn "Is this a bug that's already been attempted and failed?"; then
+    recommend "debug-squad" \
+      "Dedicated debugger does root-cause analysis before a coder writes the fix."
+    return
+  fi
+
+  if yn "Does the task need a design or contract written before any code?"; then
+    if yn "  Is the work a known linear process (design → code → review → QA)?"; then
+      recommend "pipeline" \
+        "Strict sequential stages, no orchestrator overhead. Human seeds the architect."
+      return
+    fi
+    recommend "plan-execute" \
+      "Architect writes the contract first; coder(s) implement against it; reviewer closes the loop."
+    return
+  fi
+
+  if yn "Are there many independent subtasks that can run in parallel?"; then
+    if yn "  Does correctness matter more than speed?"; then
+      recommend "ship-it" \
+        "Parallel coders with a reviewer quality gate. One reviewer sees all output."
+      return
+    fi
+    recommend "swarm" \
+      "Maximum parallel throughput, no review gate. Good when you'll iterate anyway."
+    return
+  fi
+
+  if yn "Is this a single focused piece of work that needs a quality gate?"; then
+    recommend "review-loop" \
+      "Coder and reviewer ping-pong until PASS. Clean, low-overhead quality loop."
+    return
+  fi
+
+  recommend "lean" \
+    "General-purpose default: orchestrator + 2 coders. Balanced for most feature work."
+}
+
 # Parse flags that belong to orchestrate itself (before the pattern name).
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yolo|-y) YOLO=1; shift ;;
     --dangerously-skip-permissions) export ORCH_SKIP_PERMISSIONS=1; shift ;;
     -h|--help) usage; exit 0 ;;
+    recommend) cmd_recommend; exit 0 ;;
     list)
       for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do
-        [[ -f "$p" ]] && basename "$p" .sh
+        [[ -f "$p" ]] || continue
+        name=$(basename "$p" .sh)
+        desc=$(grep -m1 '^# Description:' "$p" 2>/dev/null | sed 's/^# Description: *//' | sed 's/^\[max team\] //')
+        printf "  %-16s %s\n" "$name" "${desc:-}"
       done
       exit 0
       ;;
