@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Description: orchestrator + architect + 2 coders + reviewer + qa. No hats.
+# Description: [max team] orchestrator + architect + 2 coders + reviewer + qa
 # AskModels: orchestrator:claude architect:claude coder:claude reviewer:claude qa:claude
 #
-# Use when: complex multi-component work where specialized roles pay off —
-# the architect writes contracts, coders implement, reviewer audits, qa
-# verifies on real env.
+# Use when: you genuinely need all six roles simultaneously — large system
+# changes where design, implementation, code review, AND real-env verification
+# are all required in parallel. This is the exception, not the default.
+#
+# For most work, a focused pattern is better:
+#   plan-execute  — needs design-first (orchestrator + architect + coders + reviewer)
+#   ship-it       — needs quality gate but no dedicated architect
+#   pipeline      — known linear process, no orchestrator overhead
+#   debug-squad   — bug investigation
+#
+# 6 agents means 6 idle panes while each waits for the previous stage.
+# Only reach for full-team when the parallel specialisation genuinely pays off.
 
 set -euo pipefail
 : "${ORCHESTRATION_HOME:=$HOME/orchestration}"

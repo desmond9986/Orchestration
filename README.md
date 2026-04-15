@@ -18,7 +18,7 @@ This toolkit solves those by separating four concerns:
 |---|---|---|
 | **Patterns** (`patterns/*.sh`) | Initial team shape, CLI choices | Orchestration pattern |
 | **Roles** (`roles/core/*.md`) | What an agent does, how it finds peers | Never — role is atomic |
-| **Hats** (`roles/hats/*.md`) | Optional add-on duties (architect, qa, reviewer, spawner) | Composed at launch |
+| **Hats** (`roles/hats/*.md`) | Optional add-on duties (architect, qa, reviewer, spawner, self-verify) | Composed at launch |
 | **Protocol** (`roles/_protocol.md` + `lib/*.sh`) | How agents communicate | Never — shared rules |
 
 ## Install
@@ -49,13 +49,20 @@ orchestrate list
 ```
 
 Built-in:
-- `lean` — orchestrator (architect hat) + 2 coders, one with spawner hat
-- `swarm [N]` — orchestrator + N coders (default 3)
-- `full-team` — orchestrator + architect + 2 coders + reviewer + qa
-- `review-loop` — 1 coder + 1 reviewer
-- `lonely-coder` — solo coder wearing spawner+qa+reviewer hats
-- `debug-squad` — orchestrator + debugger + coder + qa
-- `freeform` — empty session, add agents manually
+
+| Pattern | Agents | Use when |
+|---|---|---|
+| `lean` | orchestrator (architect hat) + 2 coders | Small team, no dedicated architect needed |
+| `plan-execute [N]` | orchestrator + architect + N coders + reviewer | Task needs design-first before any code is written |
+| `ship-it [N]` | orchestrator + N coders + reviewer | Big parallelizable task that needs a quality gate |
+| `pipeline` | architect → coder → reviewer → qa | Known linear process, no orchestrator overhead |
+| `spike` | researcher + architect | Explore codebase and produce a design doc before committing to implementation |
+| `swarm [N]` | orchestrator + N coders | Fast parallel execution, no quality gate needed |
+| `review-loop` | coder + reviewer | Single-track work with ping-pong quality gating |
+| `debug-squad` | orchestrator + debugger + coder + qa | Bug investigation with root-cause analysis first |
+| `lonely-coder` | solo coder (spawner+qa+reviewer hats) | Quick fix, single agent covers everything |
+| `full-team` | orchestrator + architect + 2 coders + reviewer + qa | Maximum specialisation — most tasks don't need all 6 |
+| `freeform` | none | Add agents manually |
 
 Add your own: drop `patterns/<name>.sh` with the spawn calls you want.
 
@@ -115,6 +122,32 @@ add-agent coder codex --id coder-3  # add another coder using codex
 add-agent qa claude --parent coder-1 --id coder-1.qa   # coder-1 spawns a QA sub-agent
 
 remove-agent coder-2                # kill a pane, mark left in roster
+```
+
+## Hats
+
+Hats are optional add-on duties composed into an agent at launch via `--hats`:
+
+| Hat | What it adds |
+|---|---|
+| `architect` | Agent also writes interface contracts to `.agents/contracts/` |
+| `reviewer` | Agent also reviews code on request |
+| `qa` | Agent also verifies in real environment |
+| `spawner` | Agent can spawn sub-agents on demand when the team is missing a role |
+| `self-verify` | After completing any non-trivial task, agent spawns a reviewer sub-agent to audit its own work before reporting DONE |
+
+**`self-verify`** is the key one for autonomous quality loops. A coder with this hat:
+1. Finishes implementation
+2. Spawns `<id>.reviewer` as a sub-agent
+3. Sends a `REVIEW_REQUEST`, waits for `VERDICT`
+4. Iterates until `PASS`, then removes the sub-agent
+5. Optionally spawns `<id>.qa` for real-env verification
+
+This means a single coder in a `lonely-coder` or `swarm` session can self-enforce code review without a dedicated reviewer pane sitting idle between tasks.
+
+```bash
+# Spawn a coder that self-verifies
+add-agent coder-1 coder claude --hats self-verify,spawner
 ```
 
 Roles discover the team dynamically via `roster.sh find-role <role>` —
