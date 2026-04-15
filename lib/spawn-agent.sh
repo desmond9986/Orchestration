@@ -135,7 +135,9 @@ bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
 # whole thing as one argv string is fragile.
 launch_cli_cmd() {
   local model="$1"
-  local skip="${ORCH_SKIP_PERMISSIONS:-0}"
+  # Per-role var wins; fall back to global flag; default to 0.
+  local role_var="ORCH_SKIP_PERMISSIONS_${ROLE}"
+  local skip="${!role_var:-${ORCH_SKIP_PERMISSIONS:-0}}"
   case "$model" in
     claude)
       if [[ "$skip" == "1" ]]; then echo "claude --dangerously-skip-permissions"
