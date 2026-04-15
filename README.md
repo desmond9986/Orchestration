@@ -66,6 +66,151 @@ Built-in:
 
 Add your own: drop `patterns/<name>.sh` with the spawn calls you want.
 
+## Choosing a pattern
+
+### TL;DR decision tree
+
+```
+Is the task a quick, self-contained fix?
+  └─ yes → lonely-coder  (1 agent, fastest, cheapest)
+
+Is it exploratory — you don't know what to build yet?
+  └─ yes → spike  (researcher maps the terrain, architect produces the plan)
+
+Is it a bug that's already been attempted and failed?
+  └─ yes → debug-squad  (root-cause before fix)
+
+Does the task need a design/contract before any code is written?
+  ├─ yes, sequential, well-defined stages → pipeline
+  └─ yes, needs orchestration → plan-execute
+
+Are there many independent subtasks to parallelise?
+  ├─ correctness matters → ship-it
+  └─ speed matters more → swarm
+
+Single focused piece of work that needs a quality gate?
+  └─ review-loop
+
+Need all the above simultaneously on a large system change?
+  └─ full-team  (use sparingly — coordination overhead is real)
+```
+
+---
+
+### Comparison table
+
+Token cost is relative to `lonely-coder` (1 agent = 1×). Estimates based
+on published multi-agent benchmarks: a 4-agent team costs ~3.5× tokens
+and yields ~28–32% quality improvement on parallelisable tasks. Sequential
+tasks forced into multi-agent pipelines can *degrade* 70% due to
+coordination overhead.
+
+| Pattern | Agents | Token cost | Quality ceiling | Latency | Project size | Task type | Stakes |
+|---|---|---|---|---|---|---|---|
+| `lonely-coder` | 1 | **1×** | Baseline | Fastest | Any | Sequential, focused | Low–Medium |
+| `review-loop` | 2 | **~1.5×** | +15–20% | Fast | Small–Medium | Single-track, quality-gated | Medium–High |
+| `spike` | 2 | **~1.5×** | N/A (planning) | Fast | Any | Unknown/exploratory | Any |
+| `swarm [3]` | 4 | **~3×** | Baseline (no gate) | Fast (parallel) | Medium–Large | Many independent subtasks | Low–Medium |
+| `lean` | 3 | **~2×** | +10–15% | Medium | Small–Medium | General feature work | Medium |
+| `debug-squad` | 4 | **~3×** | High for bugs | Medium | Any | Bug investigation | Medium–High |
+| `plan-execute [1]` | 4 | **~3×** | +25–30% | Medium | Medium–Large | Design-first features | High |
+| `ship-it [2]` | 4 | **~3×** | +25–30% | Fast (parallel) | Medium–Large | Parallel + quality gate | High |
+| `pipeline` | 4 | **~3×** | +25–30% | Slower (sequential) | Medium–Large | Known linear process | High |
+| `plan-execute [2]` | 5 | **~4×** | +30–35% | Medium | Large | Design-first, parallel coders | High |
+| `full-team` | 6 | **~5×** | +30–35% | Slowest | Large | All roles needed simultaneously | Critical |
+
+**Quality ceiling** is the realistic improvement over a single agent on
+the same task, based on SWE-bench results (72.2% multi-agent vs ~65%
+single-agent) and reviewer-agent bug-catch studies (42–90% depending on
+bug type).
+
+---
+
+### Criterion-by-criterion guide
+
+#### Token budget
+
+- **Tight budget**: `lonely-coder` or `review-loop`. Beyond 2 agents the cost
+  multiplier grows faster than the quality gain for most tasks.
+- **Medium budget**: `lean`, `swarm`, `debug-squad`. 3–4 agents is the sweet
+  spot — gains plateau past 4 agents and coordination overhead starts to
+  dominate.
+- **Open budget / high stakes**: `plan-execute`, `ship-it`, `pipeline`,
+  `full-team`. Worth it when the cost of a mistake (rework, rollback,
+  production incident) exceeds the token cost several times over.
+
+Watch out: retry loops in multi-agent sessions can burn tokens fast.
+Set task timeouts and monitor with `orch-watch`.
+
+#### Codebase size
+
+| Codebase | Recommended |
+|---|---|
+| < 5k lines | `lonely-coder`, `review-loop` — context fits in one agent |
+| 5k–50k lines | `lean`, `plan-execute [1]`, `swarm` — agent specialisation pays off |
+| > 50k lines | `spike` first to map the terrain, then `plan-execute` or `ship-it` |
+
+#### Task type
+
+| Task | Pattern |
+|---|---|
+| Hot-fix / small bug | `lonely-coder` |
+| Recurring bugs / root cause unknown | `debug-squad` |
+| New feature, clear spec | `review-loop` or `lean` |
+| New feature, unclear scope | `spike` → `plan-execute` |
+| Cross-component change | `plan-execute` (architect defines boundaries) |
+| Large parallelisable refactor | `ship-it` |
+| Greenfield service | `spike` → `pipeline` or `plan-execute` |
+| Compliance / security audit | `pipeline` or `review-loop` with high-reasoning reviewer |
+
+#### Quality requirements
+
+- **Exploratory / throwaway**: Skip the reviewer — `lonely-coder` or `swarm`.
+  You'll rewrite it anyway.
+- **Standard production PR**: `lean` or `review-loop`. A reviewer catches
+  42–48% of real-world runtime bugs that self-review misses.
+- **High-stakes / regulated**: `plan-execute` or `pipeline`. The architect
+  contract forces explicit decisions on types, encoding, and error semantics
+  before a line is written.
+- **Parallel coders + correctness**: `ship-it`. One reviewer sees all output
+  and catches cross-coder inconsistencies no individual agent would notice.
+
+#### When multi-agent makes things *worse*
+
+Avoid multi-agent when:
+- **Task is inherently sequential and stateful** — forced parallelism
+  degrades quality ~70% (PlanCraft benchmark). A migration script, a
+  refactor that touches shared state, any task where steps must happen in
+  strict order: single agent wins.
+- **The model is already strong** — as model capability increases, the gap
+  between single and multi-agent narrows. On a trivial task with a
+  frontier model, the coordination overhead is pure waste.
+- **You don't have clear task decomposition** — agents without a clear
+  scope will overlap, conflict, and waste tokens. If you can't write a
+  one-sentence task per agent, don't spawn multiple agents yet.
+- **You need tight iteration loops** — ping-ponging between 4 agents to
+  refine something is slower than one agent with good feedback. Use
+  `review-loop` or `lonely-coder` with the `self-verify` hat for tight loops.
+
+---
+
+### Self-verify as a middle ground
+
+The `self-verify` hat gives any coder a built-in reflection loop without
+adding a permanently idle reviewer pane. It spawns a reviewer sub-agent
+only when needed, then tears it down. Token cost is close to `review-loop`
+but you only pay per-task, not per-session.
+
+```bash
+# swarm with per-coder self-review — quality gate without a dedicated pane
+orchestrate swarm 3
+# then add self-verify hat to each coder, or spawn them with it:
+add-agent coder claude --hats self-verify
+```
+
+Use this when you want `swarm` speed with `review-loop` quality but can't
+justify a full-time reviewer sitting idle.
+
 ## Launcher flags and model questionnaire
 
 When you run `orchestrate <pattern>` from a terminal, you are asked to
