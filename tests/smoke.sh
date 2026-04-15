@@ -201,11 +201,18 @@ test_tmux_ready() {
   local target="$sess:0.0"
   local rc
 
+  # log_line writes to .agents/log.md under project_root — give it a scratch home.
+  export ORCH_PROJECT
+  ORCH_PROJECT=$(mktemp -d)
+  ensure_agents_dir
+
   # Case 1: pane stays at the shell — readiness should time out fast.
   rc=0
   ORCH_CLI_READY_MAX=1 ORCH_CLI_READY_POLL=100 ORCH_CLI_READY_STABLE=2 \
     wait_for_cli_ready "$target" || rc=$?
   assert_eq "1" "$rc" "times out when pane stays at the shell"
+  assert_contains "$(tail -1 "$(log_file)")" "CLI_READY mode=timeout" \
+    "logs CLI_READY mode=timeout on hard-cap"
 
   # Case 2: launch an idle, non-shell command (tail -f /dev/null). It prints
   # nothing, so the output hash stabilises immediately → function returns 0.
@@ -214,7 +221,10 @@ test_tmux_ready() {
   ORCH_CLI_READY_MAX=5 ORCH_CLI_READY_POLL=100 ORCH_CLI_READY_STABLE=2 \
     wait_for_cli_ready "$target" || rc=$?
   assert_eq "0" "$rc" "detects readiness when foreground cmd is not a shell and output is stable"
+  assert_contains "$(tail -1 "$(log_file)")" "CLI_READY mode=stable" \
+    "logs CLI_READY mode=stable on success"
 
+  rm -rf "$ORCH_PROJECT"
   cleanup_tmux
 }
 

@@ -101,9 +101,16 @@ wait_for_cli_ready() {
   local max="${ORCH_CLI_READY_MAX:-8}"
   local poll_ms="${ORCH_CLI_READY_POLL:-150}"
   local need_stable="${ORCH_CLI_READY_STABLE:-3}"
-  local deadline=$(( $(date +%s) + max ))
-  local sleep_s
+  local start_ms deadline sleep_s
+  start_ms=$(( $(date +%s) * 1000 ))
+  deadline=$(( $(date +%s) + max ))
   sleep_s=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+
+  _cli_ready_log() {
+    local mode="$1"
+    local elapsed=$(( $(date +%s) * 1000 - start_ms ))
+    log_line "CLI_READY mode=$mode wait_ms=$elapsed target=$target"
+  }
 
   # Stage 1: wait for the pane's foreground process to leave the shell.
   while (( $(date +%s) < deadline )); do
@@ -122,7 +129,10 @@ wait_for_cli_ready() {
     h=$(tmux capture-pane -p -t "$target" 2>/dev/null | shasum | awk '{print $1}')
     if [[ -n "$h" && "$h" == "$last" ]]; then
       streak=$((streak + 1))
-      (( streak >= need_stable )) && return 0
+      if (( streak >= need_stable )); then
+        _cli_ready_log stable
+        return 0
+      fi
     else
       streak=1
       last="$h"
@@ -130,6 +140,7 @@ wait_for_cli_ready() {
     sleep "$sleep_s"
   done
   # Hard cap hit — caller pastes anyway.
+  _cli_ready_log timeout
   return 1
 }
 
