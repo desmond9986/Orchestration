@@ -6,6 +6,7 @@
 #   orch-task claim <task_id> <agent_id>
 #   orch-task complete <task_id> <agent_id> [--note "..."]
 #   orch-task block <task_id> <agent_id> --reason "..."
+#   orch-task unblock <task_id> <agent_id> [--note "..."]
 #   orch-task list
 #   orch-task list-available [--for <agent_id>]
 #   orch-task show <task_id>

@@ -129,37 +129,45 @@ ADD_ARGS=("$ID" "$ROLE" "$MODEL" "$TARGET")
 [[ -n "$PARENT" ]] && ADD_ARGS+=("--parent" "$PARENT")
 bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
 
-# Build the launch command for the chosen model
+# Launch the CLI bare — prompts are pasted via tmux paste-buffer afterward so
+# we never hit argv length limits (ARG_MAX ~256KB on macOS, and some CLIs cap
+# input well below that). Prompts grow with project context — passing the
+# whole thing as one argv string is fragile.
 launch_cli_cmd() {
-  local model="$1" prompt_file="$2"
+  local model="$1"
   case "$model" in
-    claude)
-      echo "claude \"\$(cat '$prompt_file')\""
-      ;;
-    codex)
-      echo "codex \"\$(cat '$prompt_file')\""
-      ;;
-    gemini)
-      echo "gemini chat -p \"\$(cat '$prompt_file')\""
-      ;;
-    shell|none)
-      # Just open a shell and cat the prompt so the human can copy-paste.
-      echo "cat '$prompt_file'"
-      ;;
+    claude)     echo "claude" ;;
+    codex)      echo "codex" ;;
+    gemini)     echo "gemini chat" ;;
+    shell|none) echo "cat '$PROMPT_FILE'" ;;
     *)
       warn "unknown model '$model' — falling back to 'shell' (prompt printed, not sent)"
-      echo "cat '$prompt_file'"
+      echo "cat '$PROMPT_FILE'"
       ;;
   esac
 }
 
-LAUNCH_CMD=$(launch_cli_cmd "$MODEL" "$PROMPT_FILE")
+# How long to wait after launching a CLI before pasting the initial prompt.
+# Override with ORCH_CLI_READY_WAIT=N (seconds). Default gives CLIs time to
+# print their banner and enter the read loop.
+CLI_READY_WAIT="${ORCH_CLI_READY_WAIT:-3}"
 
-# Send a banner + the launch command
+LAUNCH_CMD=$(launch_cli_cmd "$MODEL")
+
+# Banner + CLI launch
 send_line "$TARGET" "clear"
 send_line "$TARGET" "echo '===== agent: $ID ($ROLE$([[ -n "$HATS" ]] && echo " +$HATS")) ====='"
 send_line "$TARGET" "echo 'prompt: $PROMPT_FILE'"
 send_line "$TARGET" "$LAUNCH_CMD"
+
+# Paste the prompt as the agent's first input (only for real CLIs).
+case "$MODEL" in
+  shell|none) : ;;
+  *)
+    sleep "$CLI_READY_WAIT"
+    paste_to_pane "$TARGET" "$PROMPT_FILE"
+    ;;
+esac
 
 status_line "orchestration" "SPAWN $ID role=$ROLE model=$MODEL target=$TARGET hats=[$HATS]"
 ok "spawned: $ID → $TARGET"

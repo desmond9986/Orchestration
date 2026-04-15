@@ -6,13 +6,15 @@
 #   tasks.sh claim  <task_id> <agent_id>                 # atomic claim (flock)
 #   tasks.sh complete <task_id> <agent_id> [--note <text>]
 #   tasks.sh block    <task_id> <agent_id> --reason <text>
+#   tasks.sh unblock  <task_id> <agent_id> [--note <text>]
 #   tasks.sh list                        # all tasks
-#   tasks.sh list-available [--for <agent_id>]   # unclaimed, no unmet deps
+#   tasks.sh list-available [--for <agent_id>]   # pending only, no unmet deps
 #   tasks.sh show <task_id>
 #
 # State machine:
-#   pending → claimed (owner set) → done | blocked
-#   blocked can be re-claimed when reason cleared.
+#   pending → claimed (owner set) → done
+#   claimed → blocked (owner flags it) → pending (via unblock)
+#   done and blocked are terminal until explicitly transitioned.
 #
 # Deps: a task is "available" only when every task in depends_on is done.
 # When a task transitions to done, any dependents that became fully unblocked
@@ -140,7 +142,8 @@ _do_claim() {
   owner=$(jq -r '.owner'  <<<"$row")
 
   case "$status" in
-    pending|blocked) : ;;
+    pending) : ;;
+    blocked) die "task $task_id is blocked — run 'tasks.sh unblock' first" ;;
     claimed) die "task $task_id already claimed by $owner" ;;
     done)    die "task $task_id already done" ;;
     *)       die "task $task_id in unknown status: $status" ;;
@@ -209,7 +212,24 @@ _do_block() {
   done
   [[ -n "$reason" ]] || die "--reason required"
 
-  jq --arg id "$task_id" --arg agent "$agent" --arg r "$reason" '
+  local row status owner
+  row=$(jq -c --arg id "$task_id" '.tasks[] | select(.id==$id)' "$(tasks_file)")
+  [[ -n "$row" ]] || die "no such task: $task_id"
+  status=$(jq -r '.status' <<<"$row")
+  owner=$(jq -r '.owner'  <<<"$row")
+
+  case "$status" in
+    claimed)
+      [[ "$owner" == "$agent" ]] \
+        || die "only the owner can block a claimed task (owner=$owner)"
+      ;;
+    pending) : ;;  # any agent may preemptively block a pending task
+    blocked) die "task $task_id is already blocked" ;;
+    done)    die "task $task_id is done — cannot block a completed task" ;;
+    *)       die "task $task_id in unknown status: $status" ;;
+  esac
+
+  jq --arg id "$task_id" --arg r "$reason" '
     (.tasks[] | select(.id==$id)) |= (
       .status = "blocked" | .blocked_reason = $r
     )
@@ -217,10 +237,41 @@ _do_block() {
   warn "blocked: $task_id ($reason)"
 }
 
+_do_unblock() {
+  local task_id="$1" agent="$2"; shift 2
+  local note=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --note) note="$2"; shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  local row status
+  row=$(jq -c --arg id "$task_id" '.tasks[] | select(.id==$id)' "$(tasks_file)")
+  [[ -n "$row" ]] || die "no such task: $task_id"
+  status=$(jq -r '.status' <<<"$row")
+  [[ "$status" == "blocked" ]] \
+    || die "task $task_id is not blocked (status=$status)"
+
+  jq --arg id "$task_id" --arg note "$note" '
+    (.tasks[] | select(.id==$id)) |= (
+      .status = "pending" | .owner = null | .blocked_reason = null |
+      (if $note != "" then .note = $note else . end)
+    )
+  ' "$(tasks_file)" | _write_tasks
+  ok "unblocked: $task_id by $agent"
+
+  # Announce that the task is available again.
+  bash "$PROTOCOL_LIB" broadcast STATUS "task $task_id unblocked and available" \
+    --from "$agent" 2>/dev/null || true
+}
+
 cmd_create()   { with_lock _do_create   "$@"; }
 cmd_claim()    { with_lock _do_claim    "$@"; }
 cmd_complete() { with_lock _do_complete "$@"; }
 cmd_block()    { with_lock _do_block    "$@"; }
+cmd_unblock()  { with_lock _do_unblock  "$@"; }
 
 cmd_list() {
   ensure_tasks_file
@@ -242,7 +293,7 @@ cmd_list_available() {
   jq -r '
     (.tasks | map({key:.id, value:.status}) | from_entries) as $by
     | .tasks[]
-    | select(.status=="pending" or .status=="blocked")
+    | select(.status=="pending")
     | select([.depends_on[]? | $by[.] == "done"] | all)
     | "\(.id)\t\(.status)\t\(.title)"
   ' "$(tasks_file)" | column -t -s $'\t'
@@ -264,6 +315,7 @@ case "$CMD" in
   claim)          cmd_claim "$@" ;;
   complete)       cmd_complete "$@" ;;
   block)          cmd_block "$@" ;;
+  unblock)        cmd_unblock "$@" ;;
   list)           cmd_list ;;
   list-available) cmd_list_available "$@" ;;
   show)           cmd_show "$@" ;;

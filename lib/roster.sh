@@ -8,7 +8,8 @@
 #   roster.sh list           # all agents (active + left)
 #   roster.sh list-active    # only active
 #   roster.sh find-role <role>      # IDs of active agents with this role
-#   roster.sh target <id>           # tmux target for an agent
+#   roster.sh target <id>           # tmux target (active agents only)
+#   roster.sh target-any <id>       # tmux target regardless of status (archival)
 #   roster.sh exists <id>           # exit 0 if active, 1 otherwise
 #   roster.sh session               # current session name
 #   roster.sh show <id>             # full json record for one agent
@@ -87,6 +88,13 @@ cmd_find_role() {
 cmd_target() {
   local id="$1"
   jq -r --arg id "$id" \
+    '.agents[] | select(.id==$id and .status=="active") | .target' \
+    "$(roster_file)"
+}
+
+cmd_target_any() {
+  local id="$1"
+  jq -r --arg id "$id" \
     '.agents[] | select(.id==$id) | .target' \
     "$(roster_file)"
 }
@@ -126,6 +134,7 @@ case "$CMD" in
   list-active) cmd_list_active ;;
   find-role)   cmd_find_role "$@" ;;
   target)      cmd_target "$@" ;;
+  target-any)  cmd_target_any "$@" ;;
   exists)      cmd_exists "$@" ;;
   session)     cmd_session ;;
   show)        cmd_show "$@" ;;

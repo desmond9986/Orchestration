@@ -83,8 +83,8 @@ cmd_send() {
   local target
   target=$(bash "$ROSTER_LIB" target "$to" 2>/dev/null || true)
   if [[ -z "$target" || "$target" == "null" ]]; then
-    log_line "SEND_FAIL: target unknown for $to (from=$from type=$type)"
-    die "no such agent in roster: $to"
+    log_line "SEND_FAIL: target unknown or agent inactive for $to (from=$from type=$type)"
+    die "no active agent in roster: $to (check 'roster.sh list' — may have left)"
   fi
 
   local msg_id; msg_id=$(new_msg_id)
