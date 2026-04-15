@@ -99,30 +99,34 @@ Need all the above simultaneously on a large system change?
 
 ### Comparison table
 
-Token cost is relative to `lonely-coder` (1 agent = 1×). Estimates based
-on published multi-agent benchmarks: a 4-agent team costs ~3.5× tokens
-and yields ~28–32% quality improvement on parallelisable tasks. Sequential
-tasks forced into multi-agent pipelines can *degrade* 70% due to
-coordination overhead.
+Token cost is relative to `lonely-coder` (1 agent = 1×). Multi-agent
+setups cost several times more tokens than a solo agent in practice.
+Published research supports meaningful gains on decomposable tasks, but
+also shows sharp degradation on sequential tasks when coordination is
+forced (Google, 2024: 39–70% degradation on sequential planning tasks).
+The exact multipliers in the table are **heuristic estimates**, not
+benchmark-backed figures — use them for rough relative comparisons, not
+precise budgeting.
 
-| Pattern | Agents | Token cost | Quality ceiling | Latency | Project size | Task type | Stakes |
+| Pattern | Agents | Relative cost | Quality vs solo | Latency | Project size | Task type | Stakes |
 |---|---|---|---|---|---|---|---|
-| `lonely-coder` | 1 | **1×** | Baseline | Fastest | Any | Sequential, focused | Low–Medium |
-| `review-loop` | 2 | **~1.5×** | +15–20% | Fast | Small–Medium | Single-track, quality-gated | Medium–High |
-| `spike` | 2 | **~1.5×** | N/A (planning) | Fast | Any | Unknown/exploratory | Any |
-| `swarm [3]` | 4 | **~3×** | Baseline (no gate) | Fast (parallel) | Medium–Large | Many independent subtasks | Low–Medium |
-| `lean` | 3 | **~2×** | +10–15% | Medium | Small–Medium | General feature work | Medium |
-| `debug-squad` | 4 | **~3×** | High for bugs | Medium | Any | Bug investigation | Medium–High |
-| `plan-execute [1]` | 4 | **~3×** | +25–30% | Medium | Medium–Large | Design-first features | High |
-| `ship-it [2]` | 4 | **~3×** | +25–30% | Fast (parallel) | Medium–Large | Parallel + quality gate | High |
-| `pipeline` | 4 | **~3×** | +25–30% | Slower (sequential) | Medium–Large | Known linear process | High |
-| `plan-execute [2]` | 5 | **~4×** | +30–35% | Medium | Large | Design-first, parallel coders | High |
-| `full-team` | 6 | **~5×** | +30–35% | Slowest | Large | All roles needed simultaneously | Critical |
+| `lonely-coder` | 1 | lowest | baseline | Fastest | Any | Sequential, focused | Low–Medium |
+| `review-loop` | 2 | low | higher (reviewer catches what solo misses) | Fast | Small–Medium | Single-track, quality-gated | Medium–High |
+| `spike` | 2 | low | N/A (planning output) | Fast | Any | Unknown/exploratory | Any |
+| `lean` | 3 | medium | higher | Medium | Small–Medium | General feature work | Medium |
+| `swarm [3]` | 4 | medium–high | similar (no gate) | Fast (parallel) | Medium–Large | Many independent subtasks | Low–Medium |
+| `debug-squad` | 4 | medium–high | higher for bugs | Medium | Any | Bug investigation | Medium–High |
+| `plan-execute [1]` | 4 | medium–high | higher | Medium | Medium–Large | Design-first features | High |
+| `ship-it [2]` | 4 | medium–high | higher | Fast (parallel) | Medium–Large | Parallel + quality gate | High |
+| `pipeline` | 4 | medium–high | higher | Slower (sequential) | Medium–Large | Known linear process | High |
+| `plan-execute [2]` | 5 | high | higher still | Medium | Large | Design-first, parallel coders | High |
+| `full-team` | 6 | highest | higher still | Slowest | Large | All roles needed simultaneously | Critical |
 
-**Quality ceiling** is the realistic improvement over a single agent on
-the same task, based on SWE-bench results (72.2% multi-agent vs ~65%
-single-agent) and reviewer-agent bug-catch studies (42–90% depending on
-bug type).
+The "Quality vs solo" column is directional: more specialised roles and
+explicit review gates tend to surface issues a single agent glosses over,
+particularly at component boundaries and integration points. Gains are
+most reliable on decomposable tasks; on sequential stateful work the
+coordination overhead can eliminate the benefit entirely.
 
 ---
 
@@ -130,11 +134,13 @@ bug type).
 
 #### Token budget
 
-- **Tight budget**: `lonely-coder` or `review-loop`. Beyond 2 agents the cost
-  multiplier grows faster than the quality gain for most tasks.
-- **Medium budget**: `lean`, `swarm`, `debug-squad`. 3–4 agents is the sweet
-  spot — gains plateau past 4 agents and coordination overhead starts to
-  dominate.
+- **Tight budget**: `lonely-coder` or `review-loop`. Adding agents
+  multiplies token cost faster than it multiplies quality for most tasks,
+  so start minimal and add roles only when a specific gap appears.
+- **Medium budget**: `lean`, `swarm`, `debug-squad`. Research suggests
+  coordination overhead grows with team size and returns diminish as you
+  add more agents — a practical sweet spot is often 3–4, though the exact
+  number depends on your task decomposability.
 - **Open budget / high stakes**: `plan-execute`, `ship-it`, `pipeline`,
   `full-team`. Worth it when the cost of a mistake (rework, rollback,
   production incident) exceeds the token cost several times over.
@@ -167,8 +173,9 @@ Set task timeouts and monitor with `orch-watch`.
 
 - **Exploratory / throwaway**: Skip the reviewer — `lonely-coder` or `swarm`.
   You'll rewrite it anyway.
-- **Standard production PR**: `lean` or `review-loop`. A reviewer catches
-  42–48% of real-world runtime bugs that self-review misses.
+- **Standard production PR**: `lean` or `review-loop`. A dedicated
+  reviewer catches issues that self-review consistently misses — encoding
+  boundaries, error path handling, subtle contract violations.
 - **High-stakes / regulated**: `plan-execute` or `pipeline`. The architect
   contract forces explicit decisions on types, encoding, and error semantics
   before a line is written.
@@ -178,13 +185,14 @@ Set task timeouts and monitor with `orch-watch`.
 #### When multi-agent makes things *worse*
 
 Avoid multi-agent when:
-- **Task is inherently sequential and stateful** — forced parallelism
-  degrades quality ~70% (PlanCraft benchmark). A migration script, a
-  refactor that touches shared state, any task where steps must happen in
-  strict order: single agent wins.
-- **The model is already strong** — as model capability increases, the gap
-  between single and multi-agent narrows. On a trivial task with a
-  frontier model, the coordination overhead is pure waste.
+- **Task is inherently sequential and stateful** — Google's research on
+  agent scaling (2024) found multi-agent variants degrading 39–70% on
+  sequential planning tasks when coordination was forced. A migration
+  script, a refactor touching shared state, any task where steps must
+  happen in strict order: single agent wins.
+- **The model is already strong** — coordination overhead is a first-order
+  cost. On a simple task with a capable model, a solo agent is often
+  faster and cheaper than routing the same work through multiple agents.
 - **You don't have clear task decomposition** — agents without a clear
   scope will overlap, conflict, and waste tokens. If you can't write a
   one-sentence task per agent, don't spawn multiple agents yet.
