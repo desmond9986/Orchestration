@@ -21,6 +21,7 @@ set -euo pipefail
 export ORCHESTRATION_HOME
 
 source "$ORCHESTRATION_HOME/lib/common.sh"
+source "$ORCHESTRATION_HOME/lib/model-select.sh"
 
 usage() {
   awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
@@ -55,6 +56,7 @@ PATTERN_FILE="$ORCHESTRATION_HOME/patterns/$PATTERN.sh"
 export ORCH_PROJECT="$PWD"
 ensure_agents_dir
 
+ask_model_choices "$PATTERN_FILE"
 info "starting pattern '$PATTERN' in $PWD"
 bash "$PATTERN_FILE" "$@"
 
