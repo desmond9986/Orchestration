@@ -7,7 +7,9 @@
 #   orchestrate --help
 #
 # Flags (must come before the pattern name):
-#   --yolo     skip model-choice prompts, use each pattern's defaults
+#   --yolo                         skip model-choice prompts, use each pattern's defaults
+#   --dangerously-skip-permissions pass permission-bypass flags to each spawned CLI
+#                                  (claude --dangerously-skip-permissions, codex --yolo)
 #
 # Examples:
 #   orchestrate lean
@@ -45,6 +47,7 @@ YOLO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yolo|-y) YOLO=1; shift ;;
+    --dangerously-skip-permissions) export ORCH_SKIP_PERMISSIONS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     list)
       for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do

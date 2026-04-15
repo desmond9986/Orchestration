@@ -135,9 +135,16 @@ bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
 # whole thing as one argv string is fragile.
 launch_cli_cmd() {
   local model="$1"
+  local skip="${ORCH_SKIP_PERMISSIONS:-0}"
   case "$model" in
-    claude)     echo "claude" ;;
-    codex)      echo "codex" ;;
+    claude)
+      if [[ "$skip" == "1" ]]; then echo "claude --dangerously-skip-permissions"
+      else echo "claude"; fi
+      ;;
+    codex)
+      if [[ "$skip" == "1" ]]; then echo "codex --yolo"
+      else echo "codex"; fi
+      ;;
     gemini)     echo "gemini chat" ;;
     shell|none) echo "cat '$PROMPT_FILE'" ;;
     *)
