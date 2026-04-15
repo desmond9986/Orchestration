@@ -340,16 +340,64 @@ test_end_session() {
   rm -rf "$dir"
 }
 
+# ── model-select ─────────────────────────────────────────────────────────
+test_model_select() {
+  printf "\n\033[1mmodel-select\033[0m\n"
+
+  # _yn_to_1 must work under bash 3.2 (no ${1,,}).
+  local r
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 y')
+  assert_eq "1" "$r" "_yn_to_1 y → 1"
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 Y')
+  assert_eq "1" "$r" "_yn_to_1 Y → 1"
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 yes')
+  assert_eq "1" "$r" "_yn_to_1 yes → 1"
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 YES')
+  assert_eq "1" "$r" "_yn_to_1 YES → 1"
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 n')
+  assert_eq "0" "$r" "_yn_to_1 n → 0"
+  r=$(bash -c 'source "$ORCHESTRATION_HOME/lib/model-select.sh"; _yn_to_1 ""')
+  assert_eq "0" "$r" "_yn_to_1 empty → 0"
+
+  # Non-interactive (stdin not a tty): defaults exported, no prompts.
+  local out
+  out=$(bash -c '
+    source "$ORCHESTRATION_HOME/lib/model-select.sh"
+    ask_model_choices "$ORCHESTRATION_HOME/patterns/lean.sh"
+    echo "$ORCH_MODEL_orchestrator $ORCH_SKIP_PERMISSIONS_orchestrator $ORCH_MODEL_coder $ORCH_SKIP_PERMISSIONS_coder"
+  ')
+  assert_eq "claude 0 claude 0" "$out" "non-interactive: pattern defaults applied"
+
+  # Pre-set env vars are honoured and not overwritten.
+  out=$(bash -c '
+    export ORCH_MODEL_coder=codex
+    export ORCH_SKIP_PERMISSIONS_coder=1
+    source "$ORCHESTRATION_HOME/lib/model-select.sh"
+    ask_model_choices "$ORCHESTRATION_HOME/patterns/lean.sh"
+    echo "$ORCH_MODEL_orchestrator $ORCH_SKIP_PERMISSIONS_orchestrator $ORCH_MODEL_coder $ORCH_SKIP_PERMISSIONS_coder"
+  ')
+  assert_eq "claude 0 codex 1" "$out" "non-interactive: pre-set env respected"
+
+  # Pattern with no AskModels line: function returns without exporting anything.
+  out=$(bash -c '
+    source "$ORCHESTRATION_HOME/lib/model-select.sh"
+    ask_model_choices "$ORCHESTRATION_HOME/patterns/freeform.sh"
+    echo "${ORCH_MODEL_coder:-unset}"
+  ')
+  assert_eq "unset" "$out" "pattern without AskModels: no exports"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
-  roster)      test_roster ;;
-  protocol)    test_protocol ;;
-  tasks)       test_tasks ;;
-  tmux)        test_tmux_ready ;;
-  concurrency) test_concurrency ;;
-  end-session) test_end_session ;;
-  all)         test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_tmux_ready ;;
+  roster)       test_roster ;;
+  protocol)     test_protocol ;;
+  tasks)        test_tasks ;;
+  tmux)         test_tmux_ready ;;
+  concurrency)  test_concurrency ;;
+  end-session)  test_end_session ;;
+  model-select) test_model_select ;;
+  all)          test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_model_select; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

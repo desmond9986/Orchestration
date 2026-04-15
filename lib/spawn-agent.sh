@@ -136,8 +136,10 @@ bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
 launch_cli_cmd() {
   local model="$1"
   # Per-role var wins; fall back to global flag; default to 0.
+  # Nested ${!var:-${other:-0}} is not reliable in bash 3.2; resolve in steps.
   local role_var="ORCH_SKIP_PERMISSIONS_${ROLE}"
-  local skip="${!role_var:-${ORCH_SKIP_PERMISSIONS:-0}}"
+  local skip="${!role_var}"
+  skip="${skip:-${ORCH_SKIP_PERMISSIONS:-0}}"
   case "$model" in
     claude)
       if [[ "$skip" == "1" ]]; then echo "claude --dangerously-skip-permissions"

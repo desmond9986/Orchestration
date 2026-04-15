@@ -59,6 +59,54 @@ Built-in:
 
 Add your own: drop `patterns/<name>.sh` with the spawn calls you want.
 
+## Launcher flags and model questionnaire
+
+When you run `orchestrate <pattern>` from a terminal, you are asked to
+configure each role before any agent is spawned:
+
+```
+[orchestrate] Configure agents for this session
+  Enter to accept defaults [in brackets].
+  Models: claude, codex, gemini, shell, none
+
+  orchestrator   model [claude]: ↵
+                 skip permissions (y/N): ↵
+
+  coder          model [claude]: codex↵
+                 skip permissions (y/N): y↵
+```
+
+"Skip permissions" passes the per-CLI bypass flag automatically:
+- `claude` → `claude --dangerously-skip-permissions`
+- `codex`  → `codex --yolo`
+
+Each role is configured independently — orchestrator can be on Claude
+(no bypass) while coders run Codex with `--yolo` in the same session.
+
+**Flags** (before the pattern name):
+
+| Flag | Effect |
+|---|---|
+| `--yolo` | Skip the questionnaire entirely, use each pattern's defaults |
+| `--dangerously-skip-permissions` | Enable bypass mode for all agents without prompting |
+
+```bash
+orchestrate --yolo lean                          # no prompts, all defaults
+orchestrate --dangerously-skip-permissions lean  # prompt for models; all get bypass
+orchestrate --yolo --dangerously-skip-permissions lean   # both: fastest start
+```
+
+**Pre-setting via environment** (useful in scripts or to lock a preference):
+
+```bash
+export ORCH_MODEL_coder=codex
+export ORCH_SKIP_PERMISSIONS_coder=1
+orchestrate lean     # coder questions show "pre-set →"; orchestrator still prompted
+```
+
+Non-interactive invocations (piped stdin, CI) skip the questionnaire
+automatically and apply defaults.
+
 ## Mid-session changes
 
 ```bash

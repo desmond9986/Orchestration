@@ -19,9 +19,13 @@
 
 KNOWN_MODELS=(claude codex gemini shell none)
 
-# _yn_to_1 <answer>  — normalises y/yes/1 → "1", anything else → "0"
+# _yn_to_1 <answer>  — normalises y/yes/1 (case-insensitive) → "1", else → "0"
+# Uses glob patterns instead of ${1,,} to stay compatible with bash 3.2.
 _yn_to_1() {
-  case "${1,,}" in y|yes|1) echo "1" ;; *) echo "0" ;; esac
+  case "$1" in
+    [yY]|[yY][eE][sS]|1) echo "1" ;;
+    *) echo "0" ;;
+  esac
 }
 
 # ask_model_choices <pattern_file>
