@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# orch-watch — live dashboard: what each agent is doing RIGHT NOW.
+#
+# Refreshes every N seconds (default 2). Ctrl-C to exit.
+# Shows, for each active agent:
+#   - tmux target
+#   - last status line (what they last reported)
+#   - last N lines of their tmux pane (what they're actually displaying)
+#
+# Usage:
+#   orch-watch              # refresh every 2s, show 5 lines per pane
+#   orch-watch 3            # refresh every 3s
+#   orch-watch 2 10         # refresh every 2s, show 10 lines per pane
+#   orch-watch --help
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
+INTERVAL="${1:-2}"
+PANE_LINES="${2:-5}"
+
+export ORCH_PROJECT="$PWD"
+[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+
+hr() { printf '%.0s─' $(seq 1 $(tput cols 2>/dev/null || echo 80)); echo; }
+
+render() {
+  clear
+  printf "${C_BOLD}orchestration watch${C_RESET}  ${C_DIM}(%s, refresh=%ss, Ctrl-C to exit)${C_RESET}\n" \
+    "$(date +%H:%M:%S)" "$INTERVAL"
+  hr
+
+  printf "${C_BOLD}ROSTER${C_RESET}\n"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
+  echo ""
+
+  printf "${C_BOLD}PER-AGENT VIEW${C_RESET} ${C_DIM}(last %s lines of each pane)${C_RESET}\n" "$PANE_LINES"
+  hr
+
+  # For each active agent, show last status + pane tail
+  jq -r '.agents[] | select(.status=="active") | "\(.id)\t\(.role)\t\(.target)\t\(.model)"' \
+    "$(roster_file)" | while IFS=$'\t' read -r id role target model; do
+
+    # Last status line mentioning this agent
+    last_status=$(grep -F "[$id]" "$(status_file)" 2>/dev/null | tail -1 || true)
+
+    printf "${C_BLUE}▸ %s${C_RESET} ${C_DIM}(%s / %s @ %s)${C_RESET}\n" \
+      "$id" "$role" "$model" "$target"
+    if [[ -n "$last_status" ]]; then
+      printf "  ${C_DIM}status:${C_RESET} %s\n" "$last_status"
+    fi
+
+    # Live pane content
+    if tmux has-session -t "${target%%:*}" 2>/dev/null; then
+      tmux capture-pane -t "$target" -p 2>/dev/null \
+        | grep -v '^$' \
+        | tail -n "$PANE_LINES" \
+        | sed 's/^/  │ /'
+    else
+      printf "  ${C_YELLOW}│ (tmux pane not found)${C_RESET}\n"
+    fi
+    echo ""
+  done
+
+  printf "${C_BOLD}RECENT BUS${C_RESET}\n"
+  hr
+  tail -8 "$(bus_file)" 2>/dev/null || echo "(empty)"
+}
+
+# Main loop
+trap "clear; exit 0" INT TERM
+while true; do
+  render
+  sleep "$INTERVAL"
+done

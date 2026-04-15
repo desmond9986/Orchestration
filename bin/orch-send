@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# orch-send — inject a message into the orchestration as the human.
+#
+# Usage:
+#   orch-send <agent_id> "<message>"            # type=INFO, from=human
+#   orch-send <agent_id> --type TASK "<msg>"    # custom type
+#   orch-send --broadcast "<msg>"               # send to all active agents
+#   orch-send --from <id> <agent_id> "<msg>"    # impersonate (for debugging)
+#   orch-send --help
+#
+# Common types: TASK STATUS DONE BLOCKED QUESTION REVIEW_REQUEST VERDICT INFO
+#
+# Examples:
+#   orch-send orchestrator "please start planning the auth refactor"
+#   orch-send coder-1 --type TASK "implement packages/auth/codec.ts per contract"
+#   orch-send --broadcast "heads up — merge freeze starts at 4pm"
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+TYPE="INFO"
+FROM="human"
+BROADCAST=0
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type)      TYPE="$2"; shift 2 ;;
+    --from)      FROM="$2"; shift 2 ;;
+    --broadcast) BROADCAST=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    --) shift; ARGS+=("$@"); break ;;
+    -*) die "unknown flag: $1 (try: orch-send --help)" ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+
+export ORCH_PROJECT="$PWD"
+[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+
+if [[ "$BROADCAST" == "1" ]]; then
+  MSG="${ARGS[*]:-}"
+  [[ -n "$MSG" ]] || die "message required"
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" broadcast "$TYPE" "$MSG" --from "$FROM"
+else
+  [[ ${#ARGS[@]} -ge 2 ]] || die "usage: orch-send <agent_id> \"<message>\""
+  TO="${ARGS[0]}"
+  MSG="${ARGS[*]:1}"
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$TO" "$TYPE" "$MSG" --from "$FROM"
+fi

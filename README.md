@@ -72,30 +72,48 @@ remove-agent coder-2                # kill a pane, mark left in roster
 Roles discover the team dynamically via `roster.sh find-role <role>` —
 new agents appear automatically, left agents are skipped.
 
+## You talking to agents
+
+```bash
+orch-send <agent_id> "<message>"                      # default type=INFO
+orch-send <agent_id> --type TASK "<message>"          # custom type
+orch-send --broadcast "<message>"                     # to everyone active
+```
+
+All `orch-send` messages show up as `from:human` in the bus so agents
+know the instruction came from you, not from the orchestrator.
+
+You can also just switch to an agent's tmux pane and chat with them
+directly through their CLI — that's outside the protocol and doesn't
+appear in the bus.
+
 ## Observing the session
 
-Every inter-agent message is mirrored to a shared **bus log**
-(`.agents/bus.md`) so you can see the whole conversation from any terminal.
+Three complementary views:
+
+| View | What | Command |
+|---|---|---|
+| **Message bus** | Full payload of every message, chronological | `orch-status --follow` |
+| **Status board** | One-line events (SENT, ASSIGNED, DONE...) | `orch-status --follow-status` |
+| **Live dashboard** | Per-agent pane content — see what each is doing RIGHT NOW | `orch-watch` |
 
 ```bash
 orch-status                         # roster + last 20 bus messages
-orch-status --follow                # tail -f bus log (live view of ALL messages)
-orch-status --bus                   # print full bus
-orch-status --status                # one-line summary status board
+orch-status --follow                # tail -f bus (live message stream)
+orch-status --bus                   # full bus log
+orch-status --status                # summary status board
 orch-status --roster                # just the roster
 orch-status --inbox <id>            # peek an agent's unread inbox
-orch-status --log                   # delivery errors, retries
+orch-status --log                   # delivery errors / retries
+
+orch-watch                          # live dashboard (refresh every 2s)
+orch-watch 3 10                     # refresh every 3s, show 10 lines per pane
 ```
 
-Two visibility layers:
-
-| File | Content | Best for |
-|---|---|---|
-| `.agents/bus.md` | Full payload of every message, chronological | Following the actual conversation |
-| `.agents/status.md` | One-line per event (SENT, ASSIGNED, DONE, etc.) | High-level timeline |
-
-Open a spare terminal in the project and run `orch-status --follow` to
-watch agents talk to each other live.
+**Tip:** open three terminals —
+1. The orchestration tmux session itself
+2. `orch-watch` to see if anyone is stuck
+3. `orch-status --follow` to follow the message stream
 
 ## Teardown
 
@@ -117,6 +135,15 @@ your-project/
     ├── SPECS.md              # injected into every agent's prompt
     └── contracts/            # written to by architect, read by coders/reviewers
 ```
+
+## Cross-model communication
+
+Agents using different models (Claude + Codex + Gemini, etc.) can message
+each other freely. The protocol is file-based (inbox + bus log + tmux
+notify), so the only thing each agent needs is the ability to run bash —
+which every major AI CLI supports. A Claude coder and a Codex coder can
+both `find-role coder`, see each other in the roster, and send messages
+through the exact same commands.
 
 ## Supported models
 
