@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# end-session — tear down the current orchestration session.
+#
+# Archives .agents/ into .agents/sessions/<timestamp>/ and kills the tmux session.
+#
+# Usage:
+#   end-session [--keep-tmux]    # keep the tmux session, just archive
+#   end-session --help
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+KEEP_TMUX=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keep-tmux) KEEP_TMUX=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    *) die "unknown flag: $1" ;;
+  esac
+done
+
+export ORCH_PROJECT="$PWD"
+
+[[ -f "$(roster_file)" ]] || die "no active session in $(agents_dir)"
+
+SESSION=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" session)
+TS=$(date +"%Y%m%d-%H%M%S")
+ARCHIVE_DIR="$(agents_dir)/sessions/$TS-$SESSION"
+
+mkdir -p "$ARCHIVE_DIR"
+# Move everything except the sessions/ archive dir itself
+for item in "$(agents_dir)"/*; do
+  name=$(basename "$item")
+  [[ "$name" == "sessions" ]] && continue
+  [[ "$name" == "PROJECT_CONTEXT.md" ]] && continue    # keep project context in place
+  [[ "$name" == "SPECS.md" ]] && continue
+  mv "$item" "$ARCHIVE_DIR/"
+done
+
+ok "archived to $ARCHIVE_DIR"
+
+if [[ "$KEEP_TMUX" -eq 0 ]]; then
+  kill_session "$SESSION"
+  ok "killed tmux session: $SESSION"
+else
+  info "tmux session '$SESSION' kept alive"
+fi

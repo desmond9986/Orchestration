@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# remove-agent — kill an agent's tmux pane and mark it left in the roster.
+#
+# Usage:
+#   remove-agent <id>
+#   remove-agent --help
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+  usage; exit 0
+fi
+
+ID="$1"
+export ORCH_PROJECT="$PWD"
+
+TARGET=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target "$ID")
+if [[ -z "$TARGET" || "$TARGET" == "null" ]]; then
+  die "no such agent: $ID"
+fi
+
+kill_pane "$TARGET"
+bash "$ORCHESTRATION_HOME/lib/roster.sh" remove "$ID"
+ok "removed: $ID"

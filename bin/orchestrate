@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# orchestrate — main launcher for multi-agent orchestration sessions.
+#
+# Usage:
+#   orchestrate <pattern> [pattern-args...]
+#   orchestrate list                    # list available patterns
+#   orchestrate --help
+#
+# Examples:
+#   orchestrate lean
+#   orchestrate swarm 4                 # swarm with 4 coders
+#   orchestrate freeform                # empty session, add agents manually
+#   orchestrate lonely-coder
+#
+# A pattern script lives at $ORCHESTRATION_HOME/patterns/<name>.sh.
+# Patterns can accept their own positional args.
+
+set -euo pipefail
+
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() {
+  awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+  echo ""
+  echo "Available patterns:"
+  for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do
+    [[ -f "$p" ]] || continue
+    name=$(basename "$p" .sh)
+    # Grab the "Description:" line from the pattern if present
+    desc=$(grep -m1 '^# Description:' "$p" 2>/dev/null | sed 's/^# Description: *//')
+    printf "  %-16s %s\n" "$name" "${desc:-}"
+  done
+}
+
+if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+  usage; exit 0
+fi
+
+if [[ "$1" == "list" ]]; then
+  for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do
+    [[ -f "$p" ]] && basename "$p" .sh
+  done
+  exit 0
+fi
+
+PATTERN="$1"; shift
+PATTERN_FILE="$ORCHESTRATION_HOME/patterns/$PATTERN.sh"
+
+[[ -f "$PATTERN_FILE" ]] || die "unknown pattern: $PATTERN (try: orchestrate list)"
+
+# Pattern scripts are sourced so they can use helpers and exported context.
+export ORCH_PROJECT="$PWD"
+ensure_agents_dir
+
+info "starting pattern '$PATTERN' in $PWD"
+bash "$PATTERN_FILE" "$@"
+
+# After the pattern has spawned everyone, attach.
+SESSION=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" session 2>/dev/null || echo "")
+if [[ -n "$SESSION" ]]; then
+  ok "session '$SESSION' ready — attaching"
+  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+  attach_session "$SESSION"
+fi

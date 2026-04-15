@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# add-agent — spawn a new agent into an existing orchestration session.
+#
+# Usage:
+#   add-agent <role> <model> [--id <custom-id>] [--hats h1,h2] [--parent <id>]
+#   add-agent --help
+#
+# Examples:
+#   add-agent qa claude
+#   add-agent coder codex --id coder-3
+#   add-agent reviewer claude --hats qa
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+  usage; exit 0
+fi
+
+ROLE="$1"; shift
+MODEL="$1"; shift
+
+ID=""
+HATS=""
+PARENT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id)     ID="$2"; shift 2 ;;
+    --hats)   HATS="$2"; shift 2 ;;
+    --parent) PARENT="$2"; shift 2 ;;
+    *) die "unknown flag: $1" ;;
+  esac
+done
+
+# Default ID: role, or role-N if role is taken
+if [[ -z "$ID" ]]; then
+  if bash "$ORCHESTRATION_HOME/lib/roster.sh" exists "$ROLE" 2>/dev/null; then
+    # Count existing agents with this role and increment
+    n=$(jq --arg r "$ROLE" '[.agents[] | select(.role==$r)] | length' "$(roster_file)")
+    ID="$ROLE-$((n+1))"
+  else
+    ID="$ROLE"
+  fi
+fi
+
+export ORCH_PROJECT="$PWD"
+
+ARGS=("$ID" "$ROLE" "$MODEL")
+[[ -n "$HATS" ]]   && ARGS+=("--hats" "$HATS")
+[[ -n "$PARENT" ]] && ARGS+=("--parent" "$PARENT")
+
+bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" "${ARGS[@]}"

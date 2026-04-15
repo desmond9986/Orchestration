@@ -1,0 +1,12 @@
+# Ignore per-project agent state (this lives in each project's own .agents/)
+.agents/
+*.archive.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

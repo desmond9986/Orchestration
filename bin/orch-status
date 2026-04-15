@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# orch-status — show the live status of the current orchestration session.
+#
+# Usage:
+#   orch-status              # show roster + recent status lines
+#   orch-status --follow     # tail -f status board
+#   orch-status --roster     # just the roster
+#   orch-status --inbox <id> # peek an agent's inbox
+#   orch-status --log        # show log (errors, delivery failures)
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+export ORCH_PROJECT="$PWD"
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --follow)
+    [[ -f "$(status_file)" ]] || die "no session here"
+    tail -f "$(status_file)"
+    ;;
+  --roster)
+    [[ -f "$(roster_file)" ]] || die "no session here"
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
+    ;;
+  --inbox)
+    ID="${2:?id required}"
+    bash "$ORCHESTRATION_HOME/lib/protocol.sh" peek-inbox "$ID"
+    ;;
+  --log)
+    [[ -f "$(log_file)" ]] || die "no log"
+    cat "$(log_file)"
+    ;;
+  "")
+    [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+    printf "${C_BOLD}Roster:${C_RESET}\n"
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
+    echo ""
+    printf "${C_BOLD}Recent status:${C_RESET}\n"
+    tail -20 "$(status_file)" 2>/dev/null || echo "(none)"
+    ;;
+  *) die "unknown option: $1 (try: orch-status --help)" ;;
+esac
