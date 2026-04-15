@@ -27,6 +27,16 @@ for cmd in tmux jq; do
     ok "found: $cmd"
   fi
 done
+# CLI readiness polling hashes tmux pane content. Any of these works;
+# shasum ships with macOS, sha1sum with GNU coreutils, cksum is POSIX.
+if command -v shasum >/dev/null 2>&1 \
+   || command -v sha1sum >/dev/null 2>&1 \
+   || command -v cksum >/dev/null 2>&1; then
+  ok "found: shasum/sha1sum/cksum (pane hasher)"
+else
+  warn "no pane hasher available (shasum, sha1sum, or cksum)"
+  MISSING_DEPS=1
+fi
 if [[ "${MISSING_DEPS:-0}" -eq 1 ]]; then
   die "please install missing dependencies, then re-run ./install.sh"
 fi

@@ -61,6 +61,12 @@ _do_add() {
 _do_remove() {
   local id="$1"
   [[ -f "$(roster_file)" ]] || die "no roster"
+  # Verify the agent exists (any status) before mutating; otherwise `jq`
+  # produces an unchanged file and we'd falsely report success.
+  local found
+  found=$(jq -r --arg id "$id" \
+    '.agents[] | select(.id==$id) | .id' "$(roster_file)")
+  [[ -n "$found" ]] || die "no such agent: $id"
   local tmp; tmp=$(mktemp)
   jq --arg id "$id" --arg t "$(ts)" \
     '(.agents[] | select(.id==$id) | .status) = "left" |

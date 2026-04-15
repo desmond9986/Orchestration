@@ -70,6 +70,9 @@ test_roster() {
   assert_eq "s:0.0" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target-any a1)" \
     "target-any still resolves removed agent for archival reads"
 
+  assert_fails "remove of unknown agent id is rejected" \
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" remove does-not-exist
+
   rm -rf "$dir"
 }
 

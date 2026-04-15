@@ -4,6 +4,14 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_cmd tmux
 
+# Pick a pane-content hasher once. shasum ships with macOS; sha1sum with
+# GNU coreutils; cksum is POSIX and present everywhere. The readiness poll
+# only needs a stable fingerprint, not cryptographic strength.
+if command -v shasum  >/dev/null 2>&1; then _PANE_HASH=(shasum)
+elif command -v sha1sum >/dev/null 2>&1; then _PANE_HASH=(sha1sum)
+else _PANE_HASH=(cksum)
+fi
+
 # Initialize a tmux session for orchestration. Idempotent.
 # Args: session_name [working_dir]
 init_session() {
@@ -126,7 +134,7 @@ wait_for_cli_ready() {
   local last="" streak=0
   while (( $(date +%s) < deadline )); do
     local h
-    h=$(tmux capture-pane -p -t "$target" 2>/dev/null | shasum | awk '{print $1}')
+    h=$(tmux capture-pane -p -t "$target" 2>/dev/null | "${_PANE_HASH[@]}" | awk '{print $1}')
     if [[ -n "$h" && "$h" == "$last" ]]; then
       streak=$((streak + 1))
       if (( streak >= need_stable )); then
