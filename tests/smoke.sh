@@ -306,6 +306,40 @@ test_tmux_ready() {
   cleanup_tmux
 }
 
+# ── end-session ──────────────────────────────────────────────────────────
+test_end_session() {
+  printf "\n\033[1mend-session\033[0m\n"
+  fresh_project; local dir="$ORCH_PROJECT"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add e1 coder claude "s:0.0" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/tasks.sh" create "work" --id t-e >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send e1 INFO "hello" --from e1 \
+    >/dev/null 2>&1 || true
+
+  # --keep-tmux must leave the live control plane intact.
+  bash "$ORCHESTRATION_HOME/bin/end-session" --keep-tmux >/dev/null 2>&1
+
+  [[ -f "$dir/.agents/roster.json" ]] \
+    && pass "--keep-tmux preserves roster.json" \
+    || fail "--keep-tmux must not remove roster.json"
+
+  [[ -d "$dir/.agents/inbox" ]] \
+    && pass "--keep-tmux preserves inbox dir" \
+    || fail "--keep-tmux must not remove inbox dir"
+
+  [[ -f "$dir/.agents/tasks.json" ]] \
+    && pass "--keep-tmux preserves tasks.json" \
+    || fail "--keep-tmux must not remove tasks.json"
+
+  # Archive snapshot must also exist.
+  local archive
+  archive=$(ls -d "$dir/.agents/sessions"/*/  2>/dev/null | head -1)
+  [[ -n "$archive" && -f "${archive}roster.json" ]] \
+    && pass "--keep-tmux writes archive snapshot" \
+    || fail "--keep-tmux must write archive snapshot"
+
+  rm -rf "$dir"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
@@ -314,7 +348,8 @@ case "$SUITE" in
   tasks)       test_tasks ;;
   tmux)        test_tmux_ready ;;
   concurrency) test_concurrency ;;
-  all)         test_roster; test_protocol; test_tasks; test_concurrency; test_tmux_ready ;;
+  end-session) test_end_session ;;
+  all)         test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

@@ -4,8 +4,12 @@
 # Archives .agents/ into .agents/sessions/<timestamp>/ and kills the tmux session.
 #
 # Usage:
-#   end-session [--keep-tmux]    # keep the tmux session, just archive
+#   end-session              # archive + kill tmux session
+#   end-session --keep-tmux  # snapshot to archive, leave tmux + control plane intact
 #   end-session --help
+#
+# With --keep-tmux the archive is a point-in-time copy; the live roster, inboxes,
+# and tasks files stay in place so surviving agents can keep using protocol commands.
 
 set -euo pipefail
 : "${ORCHESTRATION_HOME:=$HOME/orchestration}"
@@ -24,7 +28,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export ORCH_PROJECT="$PWD"
+export ORCH_PROJECT="${ORCH_PROJECT:-$PWD}"
 
 [[ -f "$(roster_file)" ]] || die "no active session in $(agents_dir)"
 
@@ -33,20 +37,29 @@ TS=$(date +"%Y%m%d-%H%M%S")
 ARCHIVE_DIR="$(agents_dir)/sessions/$TS-$SESSION"
 
 mkdir -p "$ARCHIVE_DIR"
-# Move everything except the sessions/ archive dir itself
-for item in "$(agents_dir)"/*; do
-  name=$(basename "$item")
-  [[ "$name" == "sessions" ]] && continue
-  [[ "$name" == "PROJECT_CONTEXT.md" ]] && continue    # keep project context in place
-  [[ "$name" == "SPECS.md" ]] && continue
-  mv "$item" "$ARCHIVE_DIR/"
-done
 
-ok "archived to $ARCHIVE_DIR"
-
-if [[ "$KEEP_TMUX" -eq 0 ]]; then
+if [[ "$KEEP_TMUX" -eq 1 ]]; then
+  # Snapshot only — copy files so the live control plane stays intact.
+  # Agents in the surviving tmux session can continue using roster/protocol/tasks.
+  for item in "$(agents_dir)"/*; do
+    name=$(basename "$item")
+    [[ "$name" == "sessions" ]] && continue
+    [[ "$name" == "PROJECT_CONTEXT.md" ]] && continue
+    [[ "$name" == "SPECS.md" ]] && continue
+    cp -r "$item" "$ARCHIVE_DIR/"
+  done
+  ok "snapshot archived to $ARCHIVE_DIR (control plane preserved)"
+  info "tmux session '$SESSION' kept alive — roster and inbox still active"
+else
+  # Full teardown — move everything and kill the session.
+  for item in "$(agents_dir)"/*; do
+    name=$(basename "$item")
+    [[ "$name" == "sessions" ]] && continue
+    [[ "$name" == "PROJECT_CONTEXT.md" ]] && continue
+    [[ "$name" == "SPECS.md" ]] && continue
+    mv "$item" "$ARCHIVE_DIR/"
+  done
+  ok "archived to $ARCHIVE_DIR"
   kill_session "$SESSION"
   ok "killed tmux session: $SESSION"
-else
-  info "tmux session '$SESSION' kept alive"
 fi
