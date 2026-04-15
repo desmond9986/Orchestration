@@ -171,13 +171,61 @@ test_tasks() {
   rm -rf "$dir"
 }
 
+# ── tmux readiness poll ──────────────────────────────────────────────────
+# Skips if tmux is unavailable. Uses an isolated tmux server via -L so it
+# doesn't touch any live session.
+test_tmux_ready() {
+  printf "\n\033[1mtmux readiness\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local sock="orch-smoke-$$"
+  local sess="ready-test"
+  # Source libs. common.sh enables set -e; wrap assertions accordingly.
+  # shellcheck source=../lib/tmux-helpers.sh
+  set +e
+  source "$ORCHESTRATION_HOME/lib/common.sh"
+  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+  set +e
+
+  # Redirect tmux client calls through the isolated socket.
+  tmux() { command tmux -L "$sock" "$@"; }
+  cleanup_tmux() {
+    unset -f tmux 2>/dev/null || true
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  tmux new-session -d -s "$sess" -x 80 -y 24
+  local target="$sess:0.0"
+  local rc
+
+  # Case 1: pane stays at the shell — readiness should time out fast.
+  rc=0
+  ORCH_CLI_READY_MAX=1 ORCH_CLI_READY_POLL=100 ORCH_CLI_READY_STABLE=2 \
+    wait_for_cli_ready "$target" || rc=$?
+  assert_eq "1" "$rc" "times out when pane stays at the shell"
+
+  # Case 2: launch an idle, non-shell command (tail -f /dev/null). It prints
+  # nothing, so the output hash stabilises immediately → function returns 0.
+  tmux send-keys -t "$target" "clear && tail -f /dev/null" Enter
+  rc=0
+  ORCH_CLI_READY_MAX=5 ORCH_CLI_READY_POLL=100 ORCH_CLI_READY_STABLE=2 \
+    wait_for_cli_ready "$target" || rc=$?
+  assert_eq "0" "$rc" "detects readiness when foreground cmd is not a shell and output is stable"
+
+  cleanup_tmux
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
   roster)   test_roster ;;
   protocol) test_protocol ;;
   tasks)    test_tasks ;;
-  all)      test_roster; test_protocol; test_tasks ;;
+  tmux)     test_tmux_ready ;;
+  all)      test_roster; test_protocol; test_tasks; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

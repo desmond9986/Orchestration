@@ -147,11 +147,6 @@ launch_cli_cmd() {
   esac
 }
 
-# How long to wait after launching a CLI before pasting the initial prompt.
-# Override with ORCH_CLI_READY_WAIT=N (seconds). Default gives CLIs time to
-# print their banner and enter the read loop.
-CLI_READY_WAIT="${ORCH_CLI_READY_WAIT:-3}"
-
 LAUNCH_CMD=$(launch_cli_cmd "$MODEL")
 
 # Banner + CLI launch
@@ -164,7 +159,10 @@ send_line "$TARGET" "$LAUNCH_CMD"
 case "$MODEL" in
   shell|none) : ;;
   *)
-    sleep "$CLI_READY_WAIT"
+    # Wait for the CLI to stop repainting, then paste the prompt. On timeout
+    # (ORCH_CLI_READY_MAX, default 8s), paste anyway — preserves original
+    # best-effort behavior.
+    wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID — pasting anyway"
     paste_to_pane "$TARGET" "$PROMPT_FILE"
     ;;
 esac

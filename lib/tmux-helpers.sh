@@ -80,6 +80,59 @@ kill_session() {
   tmux kill-session -t "$session" 2>/dev/null || true
 }
 
+# Wait for a CLI in a pane to look ready for input.
+#
+# Two-stage poll:
+#   1. Wait until pane's foreground command is no longer a shell (cli launched).
+#   2. Wait until capture-pane output hash is stable for N consecutive samples
+#      (cli has finished printing its banner and is in a read loop).
+#
+# Falls through to paste anyway on timeout — preserves previous sleep-based
+# behavior as a hard cap.
+#
+# Env knobs:
+#   ORCH_CLI_READY_MAX   — hard cap in seconds (default 8)
+#   ORCH_CLI_READY_POLL  — poll interval in milliseconds (default 150)
+#   ORCH_CLI_READY_STABLE — consecutive identical samples to declare idle (default 3)
+#
+# Usage: wait_for_cli_ready <target>
+wait_for_cli_ready() {
+  local target="$1"
+  local max="${ORCH_CLI_READY_MAX:-8}"
+  local poll_ms="${ORCH_CLI_READY_POLL:-150}"
+  local need_stable="${ORCH_CLI_READY_STABLE:-3}"
+  local deadline=$(( $(date +%s) + max ))
+  local sleep_s
+  sleep_s=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+
+  # Stage 1: wait for the pane's foreground process to leave the shell.
+  while (( $(date +%s) < deadline )); do
+    local cmd
+    cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null || echo "")
+    case "$cmd" in
+      ""|bash|zsh|sh|fish|dash|ksh) sleep "$sleep_s" ;;
+      *) break ;;
+    esac
+  done
+
+  # Stage 2: wait for output to stop changing.
+  local last="" streak=0
+  while (( $(date +%s) < deadline )); do
+    local h
+    h=$(tmux capture-pane -p -t "$target" 2>/dev/null | shasum | awk '{print $1}')
+    if [[ -n "$h" && "$h" == "$last" ]]; then
+      streak=$((streak + 1))
+      (( streak >= need_stable )) && return 0
+    else
+      streak=1
+      last="$h"
+    fi
+    sleep "$sleep_s"
+  done
+  # Hard cap hit — caller pastes anyway.
+  return 1
+}
+
 # Attach (foreground) — if already inside tmux, switch instead.
 attach_session() {
   local session="$1"
