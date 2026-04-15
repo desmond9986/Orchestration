@@ -8,6 +8,14 @@
 #   protocol.sh broadcast <TYPE> "<payload>" [--from <id>]    # send to all active
 #   protocol.sh status <your_id> "<msg>"   # write to status board
 #
+# Delivery modes (env ORCH_DELIVERY):
+#   notify  (default) — write to inbox, print "# CHECK INBOX" in target pane
+#   push              — write to inbox AND paste the full message into target pane
+#   silent            — write to inbox only, no tmux interaction
+#
+# Inbox format: JSON Lines (.jsonl). One object per message:
+#   {"id","ts","from","to","type","payload","read":false}
+#
 # Message types (convention, not enforced):
 #   TASK STATUS DONE BLOCKED QUESTION REVIEW_REQUEST VERDICT INFO
 
@@ -16,20 +24,49 @@ require_cmd jq
 require_cmd tmux
 
 ROSTER_LIB="$(dirname "${BASH_SOURCE[0]}")/roster.sh"
+DELIVERY="${ORCH_DELIVERY:-notify}"
 
 CMD="${1:-help}"; shift || true
 
 new_msg_id() { echo "msg-$(date +%s)-$RANDOM"; }
 
+inbox_path()   { echo "$(inbox_dir)/$1.jsonl"; }
+archive_path() { echo "$(inbox_dir)/$1.archive.jsonl"; }
+
 deliver_notify() {
-  # Try to deliver notification to a tmux pane. Returns 0 on success.
+  # Minimal notification: blank line + "# CHECK INBOX (id)".
   local target="$1" id="$2"
-  if ! tmux has-session -t "${target%%:*}" 2>/dev/null; then
-    return 1
-  fi
-  # Use load-buffer + paste-buffer for safety with multi-line / special chars.
+  tmux has-session -t "${target%%:*}" 2>/dev/null || return 1
   tmux send-keys -t "$target" "" Enter 2>/dev/null || return 1
   tmux send-keys -t "$target" "# CHECK INBOX ($id)" Enter 2>/dev/null || return 1
+  return 0
+}
+
+deliver_push() {
+  # Paste the full message block into the target pane so the agent sees it
+  # immediately without polling. Still writes to inbox as audit trail.
+  local target="$1" json_line="$2"
+  tmux has-session -t "${target%%:*}" 2>/dev/null || return 1
+  local from to type id payload
+  from=$(jq -r '.from'    <<<"$json_line")
+  to=$(jq -r '.to'        <<<"$json_line")
+  type=$(jq -r '.type'    <<<"$json_line")
+  id=$(jq -r '.id'        <<<"$json_line")
+  payload=$(jq -r '.payload' <<<"$json_line")
+
+  local tmpf; tmpf=$(mktemp)
+  {
+    printf "\n# ─── INCOMING [%s] from:%s type:%s id:%s ───\n" \
+      "$(ts_short)" "$from" "$type" "$id"
+    printf "%s\n" "$payload"
+    printf "# ─── END (reply: orch-send %s \"...\" or via protocol.sh send) ───\n" "$from"
+  } > "$tmpf"
+
+  local buf="orch-msg-$(date +%s%N)"
+  tmux load-buffer -b "$buf" "$tmpf"
+  tmux paste-buffer -b "$buf" -t "$target" -d 2>/dev/null || { rm -f "$tmpf"; return 1; }
+  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  rm -f "$tmpf"
   return 0
 }
 
@@ -51,26 +88,44 @@ cmd_send() {
   fi
 
   local msg_id; msg_id=$(new_msg_id)
-  local inbox="$(inbox_dir)/$to.md"
+  local inbox; inbox=$(inbox_path "$to")
   mkdir -p "$(inbox_dir)"
-  {
-    printf "\n[MSG from:%s to:%s type:%s id:%s ts:%s]\n" \
-      "$from" "$to" "$type" "$msg_id" "$(ts)"
-    printf "%s\n" "$payload"
-    printf "[END]\n"
-  } >> "$inbox"
 
-  # Mirror every message to the shared bus log so the human sees everything.
+  local json_line
+  json_line=$(jq -c -n \
+    --arg id "$msg_id" --arg ts "$(ts)" \
+    --arg from "$from" --arg to "$to" \
+    --arg type "$type" --arg payload "$payload" \
+    '{id:$id, ts:$ts, from:$from, to:$to, type:$type, payload:$payload, read:false}')
+  printf "%s\n" "$json_line" >> "$inbox"
+
+  # Mirror to human-readable bus log.
   bus_line "$from" "$to" "$type" "$msg_id" "$payload"
-
   status_line "$from" "SENT $type → $to (id=$msg_id)"
 
-  if deliver_notify "$target" "$to"; then
-    ok "sent → $to [$type] id=$msg_id"
-  else
-    warn "wrote to inbox but tmux notify failed for $to ($target)"
-    log_line "NOTIFY_FAIL: $to target=$target msg=$msg_id"
-  fi
+  case "$DELIVERY" in
+    silent)
+      ok "queued → $to [$type] id=$msg_id (silent)"
+      ;;
+    push)
+      if deliver_push "$target" "$json_line"; then
+        ok "pushed → $to [$type] id=$msg_id"
+      elif deliver_notify "$target" "$to"; then
+        warn "push failed, fell back to notify for $to"
+      else
+        warn "wrote to inbox but tmux delivery failed for $to ($target)"
+        log_line "DELIVER_FAIL: $to target=$target msg=$msg_id mode=push"
+      fi
+      ;;
+    notify|*)
+      if deliver_notify "$target" "$to"; then
+        ok "sent → $to [$type] id=$msg_id"
+      else
+        warn "wrote to inbox but tmux notify failed for $to ($target)"
+        log_line "NOTIFY_FAIL: $to target=$target msg=$msg_id"
+      fi
+      ;;
+  esac
 }
 
 cmd_broadcast() {
@@ -82,7 +137,7 @@ cmd_broadcast() {
       *) die "unknown flag: $1" ;;
     esac
   done
-  local ids; ids=$(bash "$ROSTER_LIB" find-role "" 2>/dev/null || true)
+  local ids
   ids=$(jq -r '.agents[] | select(.status=="active") | .id' "$(roster_file)")
   for id in $ids; do
     [[ "$id" == "$from" ]] && continue
@@ -92,13 +147,16 @@ cmd_broadcast() {
 
 cmd_check_inbox() {
   local id="$1"
-  local inbox="$(inbox_dir)/$id.md"
-  local archive="$(inbox_dir)/$id.archive.md"
+  local inbox; inbox=$(inbox_path "$id")
+  local archive; archive=$(archive_path "$id")
   if [[ ! -s "$inbox" ]]; then
     echo "(inbox empty)"
     return 0
   fi
-  cat "$inbox"
+  # Human-readable render, then archive & clear.
+  jq -r '
+    "\n[\(.ts)] \(.from) → \(.to)  [\(.type)]  id=\(.id)\n\(.payload)\n[END]"
+  ' "$inbox"
   cat "$inbox" >> "$archive"
   : > "$inbox"
   status_line "$id" "INBOX READ"
@@ -106,11 +164,13 @@ cmd_check_inbox() {
 
 cmd_peek_inbox() {
   local id="$1"
-  local inbox="$(inbox_dir)/$id.md"
+  local inbox; inbox=$(inbox_path "$id")
   if [[ ! -s "$inbox" ]]; then
     echo "(inbox empty)"
   else
-    cat "$inbox"
+    jq -r '
+      "\n[\(.ts)] \(.from) → \(.to)  [\(.type)]  id=\(.id)\n\(.payload)\n[END]"
+    ' "$inbox"
   fi
 }
 

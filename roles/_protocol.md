@@ -49,15 +49,23 @@ bash "$ORCHESTRATION_HOME/lib/protocol.sh" send <to_id> <TYPE> "<payload>" --fro
 
 ## Receiving Messages
 
-When you see `# CHECK INBOX (<your_id>)` in your terminal, or at the start of
-each work cycle, run:
+Two delivery modes, controlled by `ORCH_DELIVERY` env var:
+
+- `notify` (default) — you see `# CHECK INBOX (<your_id>)` in your pane.
+- `push` — the full message text is pasted directly into your pane;
+  no need to poll.
+
+Regardless of mode, the durable inbox is JSONL at
+`.agents/inbox/<your_id>.jsonl`. At the start of each work cycle, or when you
+see the `CHECK INBOX` hint, run:
 
 ```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox <your_id>
 ```
 
-This prints unread messages and archives them. Always act on your messages
-before starting new work.
+This renders unread messages in human-readable form and archives them to
+`.agents/inbox/<your_id>.archive.jsonl`. Always act on your messages before
+starting new work.
 
 ## Posting Status
 
@@ -72,6 +80,29 @@ Do this:
 - Every few minutes during long work
 - When you hit a blocker
 - When you finish
+
+## Shared Task List
+
+For multi-step work, the team uses a shared task list at `.agents/tasks.json`.
+Claims are atomic; dependents auto-unblock when a task completes.
+
+```bash
+# See what you can pick up
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" list-available --for <your_id>
+
+# Claim one (atomic — only one agent wins)
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" claim <task_id> <your_id>
+
+# Mark done (broadcasts STATUS to any task whose deps just cleared)
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete <task_id> <your_id> --note "<summary>"
+
+# Block if you can't proceed
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" block <task_id> <your_id> --reason "<why>"
+```
+
+Orchestrators/architects `create` tasks with `--depends <id,id>` to express
+ordering. Workers prefer `list-available` over being hand-assigned individual
+tasks — it removes a scheduling hop.
 
 ## Handling Gaps
 
