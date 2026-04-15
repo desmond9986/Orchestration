@@ -74,14 +74,33 @@ Findings:
 Verification check: <adequate | inadequate — needs <what>>
 Next steps: <what the coder should do, or 'none — approved'>" \
   --from <your_id>
-```
 
-Post to status board as well:
-
-```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
   "VERDICT <PASS|PARTIAL|FAIL> on <task> → <requester>"
 ```
+
+### 6. Advance to QA (pipeline sessions only)
+
+When the verdict is `PASS` and there is no orchestrator, forward the work
+to QA yourself — the orchestrator is the one who would normally do this,
+so in an orchestrator-less pipeline you own the handoff.
+
+```bash
+ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
+QA=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role qa | head -1)
+
+if [[ -z "$ORCH" && -n "$QA" && "<verdict>" == "PASS" ]]; then
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$QA" TASK \
+    "Code review passed for task <id>. Please verify in the real environment.
+Files changed: <list>
+What to verify: <expected behaviour, pass criteria>
+Contract: .agents/contracts/<name>.md" \
+    --from <your_id>
+fi
+```
+
+If there is an orchestrator, skip this — the orchestrator handles QA
+assignment after receiving your verdict.
 
 ## Verdict Guidelines
 

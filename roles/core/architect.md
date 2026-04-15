@@ -78,21 +78,38 @@ Save to `.agents/contracts/<name>.md`:
 <explicit list of things this does NOT do>
 ```
 
-### 4. Announce
+### 4. Announce and hand off
 
 ```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
   "CONTRACT ready: <name> at .agents/contracts/<name>.md"
 
 ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
+
 if [[ -n "$ORCH" ]]; then
+  # Orchestrator-led session: report to the orchestrator; they assign coders.
   bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$ORCH" INFO \
-    "Contract <name> ready at .agents/contracts/<name>.md. \
+    "Contract <name> ready at .agents/contracts/<name>.md.
 Key decisions: <summary of important choices>" \
     --from <your_id>
+else
+  # Pipeline / orchestrator-less session: hand off directly to the coder(s).
+  # Each coder gets a TASK so they can start immediately without waiting for
+  # a human to relay the handoff.
+  CODERS=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role coder)
+  for CODER in $CODERS; do
+    bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$CODER" TASK \
+      "Contract ready: .agents/contracts/<name>.md
+Implement against this contract. Send REVIEW_REQUEST to the reviewer
+when done. Key decisions: <summary of important choices>" \
+      --from <your_id>
+  done
+  if [[ -z "$CODERS" ]]; then
+    # No coders either — surface to human via status board.
+    bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
+      "CONTRACT ready: <name> — awaiting coder assignment"
+  fi
 fi
-# If there is no orchestrator, the status-board announcement above is enough —
-# the human and other agents will see it there.
 ```
 
 ### 5. Answer clarifications

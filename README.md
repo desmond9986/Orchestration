@@ -147,7 +147,7 @@ This means a single coder in a `lonely-coder` or `swarm` session can self-enforc
 
 ```bash
 # Spawn a coder that self-verifies
-add-agent coder-1 coder claude --hats self-verify,spawner
+add-agent coder claude --id coder-1 --hats self-verify,spawner
 ```
 
 Roles discover the team dynamically via `roster.sh find-role <role>` —
