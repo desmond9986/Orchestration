@@ -6,11 +6,14 @@
 #   orchestrate list                    # list available patterns
 #   orchestrate --help
 #
+# Flags (must come before the pattern name):
+#   --yolo     skip model-choice prompts, use each pattern's defaults
+#
 # Examples:
 #   orchestrate lean
+#   orchestrate --yolo lean             # skip prompts, use defaults
 #   orchestrate swarm 4                 # swarm with 4 coders
 #   orchestrate freeform                # empty session, add agents manually
-#   orchestrate lonely-coder
 #
 # A pattern script lives at $ORCHESTRATION_HOME/patterns/<name>.sh.
 # Patterns can accept their own positional args.
@@ -36,16 +39,25 @@ usage() {
   done
 }
 
-if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
-  usage; exit 0
-fi
+YOLO=0
 
-if [[ "$1" == "list" ]]; then
-  for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do
-    [[ -f "$p" ]] && basename "$p" .sh
-  done
-  exit 0
-fi
+# Parse flags that belong to orchestrate itself (before the pattern name).
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yolo|-y) YOLO=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    list)
+      for p in "$ORCHESTRATION_HOME/patterns/"*.sh; do
+        [[ -f "$p" ]] && basename "$p" .sh
+      done
+      exit 0
+      ;;
+    -*) die "unknown flag: $1 (try: orchestrate --help)" ;;
+    *)  break ;;   # first non-flag arg is the pattern name
+  esac
+done
+
+if [[ $# -eq 0 ]]; then usage; exit 0; fi
 
 PATTERN="$1"; shift
 PATTERN_FILE="$ORCHESTRATION_HOME/patterns/$PATTERN.sh"
@@ -56,7 +68,11 @@ PATTERN_FILE="$ORCHESTRATION_HOME/patterns/$PATTERN.sh"
 export ORCH_PROJECT="$PWD"
 ensure_agents_dir
 
-ask_model_choices "$PATTERN_FILE"
+if [[ "$YOLO" -eq 1 ]]; then
+  info "--yolo: skipping model prompts, using pattern defaults"
+else
+  ask_model_choices "$PATTERN_FILE"
+fi
 info "starting pattern '$PATTERN' in $PWD"
 bash "$PATTERN_FILE" "$@"
 
