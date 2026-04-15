@@ -168,6 +168,81 @@ test_tasks() {
   status=$(jq -r '.tasks[] | select(.id=="t-b") | .status' "$dir/.agents/tasks.json")
   assert_eq "claimed" "$status" "unblocked task can be re-claimed"
 
+  # Blocked-then-complete bypass: claim → block → complete must NOT transition
+  # a blocked task straight to done. The lifecycle is blocked → unblock → done.
+  bash "$ORCHESTRATION_HOME/lib/tasks.sh" create "C" --id t-c >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/tasks.sh" claim t-c c1 >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/tasks.sh" block t-c c1 --reason "api down" >/dev/null 2>&1
+  assert_fails "cannot complete a blocked task (blocked→done bypass)" \
+    bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete t-c c1 --note "oops"
+  status=$(jq -r '.tasks[] | select(.id=="t-c") | .status' "$dir/.agents/tasks.json")
+  assert_eq "blocked" "$status" "blocked task stays blocked after rejected complete"
+
+  # Cannot complete a task that was never claimed.
+  bash "$ORCHESTRATION_HOME/lib/tasks.sh" create "D" --id t-d >/dev/null
+  assert_fails "cannot complete a pending (never claimed) task" \
+    bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete t-d c1
+
+  rm -rf "$dir"
+}
+
+# ── concurrency ──────────────────────────────────────────────────────────
+test_concurrency() {
+  printf "\n\033[1mconcurrency\033[0m\n"
+  fresh_project; local dir="$ORCH_PROJECT"
+
+  # 1. Roster add race: 20 parallel adds must all land (or cleanly fail with
+  # "already exists" — none silently dropped due to lost-update).
+  local n=20
+  for i in $(seq 1 "$n"); do
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" add "agent-$i" coder claude "s:0.$i" \
+      >/dev/null 2>&1 &
+  done
+  wait
+  local count
+  count=$(jq '.agents | length' "$dir/.agents/roster.json")
+  assert_eq "$n" "$count" "20 parallel adds all land (no lost-update race)"
+
+  # 2. Concurrent sends during check-inbox: a send arriving mid-read must not
+  # be silently truncated. We run many send/read cycles and assert that the
+  # sum of (inbox + archive + rendered) lines equals the number of sends.
+  fresh_project; dir="$ORCH_PROJECT"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add sender coder claude "s:0.0" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add rcvr   coder claude "s:0.1" >/dev/null
+
+  local sends=50
+  (
+    for i in $(seq 1 "$sends"); do
+      bash "$ORCHESTRATION_HOME/lib/protocol.sh" send rcvr INFO "msg-$i" --from sender \
+        >/dev/null 2>&1
+    done
+  ) &
+  local sender_pid=$!
+  # Race check-inbox against the sends — spin a few readers concurrently.
+  local reads=0
+  while kill -0 "$sender_pid" 2>/dev/null; do
+    bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox rcvr \
+      >>"$dir/reader.out" 2>/dev/null
+    reads=$((reads+1))
+  done
+  wait "$sender_pid"
+  # Drain whatever arrived after the last read.
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox rcvr \
+    >>"$dir/reader.out" 2>/dev/null
+
+  # Count "msg-N" payloads across rendered output + archive — must equal sends.
+  local rendered archived
+  rendered=$(grep -c '^msg-' "$dir/reader.out" 2>/dev/null || echo 0)
+  archived=$(wc -l < "$dir/.agents/inbox/rcvr.archive.jsonl" 2>/dev/null | tr -d ' ')
+  local inbox_left=0
+  if [[ -f "$dir/.agents/inbox/rcvr.jsonl" ]]; then
+    inbox_left=$(wc -l < "$dir/.agents/inbox/rcvr.jsonl" | tr -d ' ')
+  fi
+  # Rendered and archived contain the same messages — use archive + any
+  # remaining inbox as the durable count.
+  local total=$((archived + inbox_left))
+  assert_eq "$sends" "$total" "no messages lost across concurrent send + check-inbox"
+
   rm -rf "$dir"
 }
 
@@ -231,11 +306,12 @@ test_tmux_ready() {
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
-  roster)   test_roster ;;
-  protocol) test_protocol ;;
-  tasks)    test_tasks ;;
-  tmux)     test_tmux_ready ;;
-  all)      test_roster; test_protocol; test_tasks; test_tmux_ready ;;
+  roster)      test_roster ;;
+  protocol)    test_protocol ;;
+  tasks)       test_tasks ;;
+  tmux)        test_tmux_ready ;;
+  concurrency) test_concurrency ;;
+  all)         test_roster; test_protocol; test_tasks; test_concurrency; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

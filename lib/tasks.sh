@@ -43,39 +43,10 @@ ensure_tasks_file() {
   fi
 }
 
-# Acquire an exclusive mutex using mkdir (atomic on POSIX).
-# Spins up to ~10s before giving up. Stale locks older than 60s are reaped.
-_acquire_lock() {
-  local lock; lock=$(tasks_lock)
-  local waited=0
-  while ! mkdir "$lock" 2>/dev/null; do
-    # Reap stale lock
-    if [[ -d "$lock" ]]; then
-      local age
-      age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || date +%s) ))
-      if (( age > 60 )); then
-        rmdir "$lock" 2>/dev/null || true
-        continue
-      fi
-    fi
-    sleep 0.1
-    waited=$((waited + 1))
-    (( waited > 100 )) && die "could not acquire task lock after 10s"
-  done
-}
-
-_release_lock() { rmdir "$(tasks_lock)" 2>/dev/null || true; }
-
-# Run a mutation under the mutex. Usage: with_lock <function_name> [args...]
+# Run a task-list mutation under the shared mutex.
 with_lock() {
   ensure_tasks_file
-  _acquire_lock
-  trap '_release_lock' EXIT
-  "$@"
-  local rc=$?
-  _release_lock
-  trap - EXIT
-  return $rc
+  with_file_lock "$(tasks_lock)" "$@"
 }
 
 _write_tasks() {
@@ -170,10 +141,20 @@ _do_complete() {
     esac
   done
 
-  local owner
-  owner=$(jq -r --arg id "$task_id" \
-    '.tasks[] | select(.id==$id) | .owner' "$(tasks_file)")
-  [[ "$owner" == "$agent" ]] || die "task $task_id is not owned by $agent (owner=$owner)"
+  local row status owner
+  row=$(jq -c --arg id "$task_id" '.tasks[] | select(.id==$id)' "$(tasks_file)")
+  [[ -n "$row" ]] || die "no such task: $task_id"
+  status=$(jq -r '.status' <<<"$row")
+  owner=$(jq -r '.owner'  <<<"$row")
+
+  case "$status" in
+    claimed) : ;;
+    pending) die "task $task_id is not claimed — run 'tasks.sh claim' first" ;;
+    blocked) die "task $task_id is blocked — run 'tasks.sh unblock' before completing" ;;
+    done)    die "task $task_id is already done" ;;
+    *)       die "task $task_id in unknown status: $status" ;;
+  esac
+  [[ "$owner" == "$agent" ]] || die "task $task_id is owned by $owner, not $agent"
 
   jq --arg id "$task_id" --arg t "$(ts)" --arg note "$note" '
     (.tasks[] | select(.id==$id)) |= (

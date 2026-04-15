@@ -30,7 +30,9 @@ cmd_init() {
   ok "roster initialized: session=$session"
 }
 
-cmd_add() {
+roster_lock() { echo "$(agents_dir)/roster.lock.d"; }
+
+_do_add() {
   local id="$1" role="$2" model="$3" target="$4"; shift 4
   local hats="[]" parent="null"
   while [[ $# -gt 0 ]]; do
@@ -56,7 +58,7 @@ cmd_add() {
   ok "added: $id ($role, $model) → $target"
 }
 
-cmd_remove() {
+_do_remove() {
   local id="$1"
   [[ -f "$(roster_file)" ]] || die "no roster"
   local tmp; tmp=$(mktemp)
@@ -66,6 +68,11 @@ cmd_remove() {
     "$(roster_file)" > "$tmp" && mv "$tmp" "$(roster_file)"
   ok "removed: $id"
 }
+
+# Mutations are serialized through the roster lock — concurrent add/remove
+# used to race through read-modify-write and drop entries.
+cmd_add()    { with_file_lock "$(roster_lock)" _do_add "$@"; }
+cmd_remove() { with_file_lock "$(roster_lock)" _do_remove "$@"; }
 
 cmd_list() {
   jq -r '.agents[] | "\(.id)\t\(.role)\t\(.model)\t\(.target)\t\(.status)"' \

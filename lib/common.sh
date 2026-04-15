@@ -72,3 +72,37 @@ status_line() {
   local msg="$*"
   printf "[%s][%s] %s\n" "$(ts_short)" "$agent" "$msg" >> "$(status_file)"
 }
+
+# File-based mutex using mkdir (atomic on POSIX, portable across macOS/Linux,
+# no dependency on flock). Usage:
+#
+#   with_file_lock <lock_dir_path> <fn> [fn_args...]
+#
+# Spins up to 10s before giving up. Stale locks older than 60s are reaped so a
+# crashed process cannot wedge the mutex forever.
+with_file_lock() {
+  local lock="$1"; shift
+  local waited=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    if [[ -d "$lock" ]]; then
+      local age
+      age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || date +%s) ))
+      if (( age > 60 )); then
+        rmdir "$lock" 2>/dev/null || true
+        continue
+      fi
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+    (( waited > 100 )) && die "could not acquire lock at $lock after 10s"
+  done
+  # The wrapped command may call `die` (→ exit) or fail under `set -e`. Either
+  # path skips the normal rmdir below, so register an EXIT trap to guarantee
+  # the lock is released even when the shell is about to exit.
+  trap 'rmdir "'"$lock"'" 2>/dev/null || true' EXIT
+  local rc=0
+  "$@" || rc=$?
+  rmdir "$lock" 2>/dev/null || true
+  trap - EXIT
+  return $rc
+}

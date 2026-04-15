@@ -149,16 +149,25 @@ cmd_check_inbox() {
   local id="$1"
   local inbox; inbox=$(inbox_path "$id")
   local archive; archive=$(archive_path "$id")
-  if [[ ! -s "$inbox" ]]; then
+  # Atomic rename snapshots the current inbox. Any concurrent send's >> will
+  # create a new inbox file and append there safely — the read/archive here
+  # operates on the snapshot in isolation, so no messages are dropped by a
+  # race between cat and truncate.
+  local snapshot="${inbox}.reading.$$"
+  if ! mv "$inbox" "$snapshot" 2>/dev/null; then
     echo "(inbox empty)"
     return 0
   fi
-  # Human-readable render, then archive & clear.
+  if [[ ! -s "$snapshot" ]]; then
+    rm -f "$snapshot"
+    echo "(inbox empty)"
+    return 0
+  fi
   jq -r '
     "\n[\(.ts)] \(.from) → \(.to)  [\(.type)]  id=\(.id)\n\(.payload)\n[END]"
-  ' "$inbox"
-  cat "$inbox" >> "$archive"
-  : > "$inbox"
+  ' "$snapshot"
+  cat "$snapshot" >> "$archive"
+  rm -f "$snapshot"
   status_line "$id" "INBOX READ"
 }
 
