@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# orch-task — shared task list for the current orchestration session.
+#
+# Usage:
+#   orch-task create "<title>" [--id t-XX] [--depends a,b] [--note "..."]
+#   orch-task claim <task_id> <agent_id>
+#   orch-task complete <task_id> <agent_id> [--note "..."]
+#   orch-task block <task_id> <agent_id> --reason "..."
+#   orch-task list
+#   orch-task list-available [--for <agent_id>]
+#   orch-task show <task_id>
+#   orch-task --help
+#
+# Notes:
+#   - Claims are atomic (flock) so two agents racing for the same task are safe.
+#   - Tasks with unmet depends_on are hidden from list-available.
+#   - On complete, dependents that become ready are broadcast to the team.
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+case "${1:-}" in -h|--help|"") usage; exit 0 ;; esac
+
+export ORCH_PROJECT="$PWD"
+[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" "$@"

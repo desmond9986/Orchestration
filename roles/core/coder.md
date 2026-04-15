@@ -38,11 +38,19 @@ If a role is missing, adapt:
 
 ### 1. Receive your task
 
+Two sources — check both:
+
 ```bash
+# Direct assignments
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox <your_id>
+
+# Self-serve from the shared task list
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" list-available --for <your_id>
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" claim <task_id> <your_id>
 ```
 
-If the task is unclear, send a `QUESTION` to the sender before coding.
+Claims are atomic — if two coders race for the same task, only one wins.
+If the task is unclear, send a `QUESTION` to the orchestrator before coding.
 
 ### 2. Read the context
 
@@ -97,6 +105,16 @@ address findings and re-request.
 
 ### 7. Report DONE
 
+If the task came from the shared list, mark it complete — dependents get
+auto-unblocked:
+
+```bash
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete <task_id> <your_id> \
+  --note "Changed: <files>; Tested: <env>"
+```
+
+Also notify the orchestrator (or human if none):
+
 ```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" send orchestrator DONE \
   "Task: <id>
@@ -105,8 +123,6 @@ Tested: <what you verified, and against what environment>
 Unresolved: <anything left, or 'none'>" \
   --from <your_id>
 ```
-
-(If no orchestrator exists, send DONE to the human via status board.)
 
 ## When you hit trouble
 

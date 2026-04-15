@@ -49,24 +49,25 @@ Break the goal into tasks. For each task:
 
 Write the plan to `.agents/plan.md` for visibility.
 
-## Step 3: Assign
+## Step 3: Record tasks in the shared list
 
-For each ready task:
+Instead of (or in addition to) sending TASK messages, put work in the shared
+task list so workers can self-claim and dependents auto-unblock:
 
 ```bash
-bash "$ORCHESTRATION_HOME/lib/protocol.sh" send <agent_id> TASK \
-  "Task: <description>
-Inputs: <refs>
-Success criteria: <what DONE looks like>
-Depends on: <task_id or 'none'>" \
-  --from orchestrator
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" create "<title>" \
+  --id <short-id> --depends <other-id,...> --note "<success criteria>"
 ```
 
-Post to status board:
+For a direct hand-off, still use `protocol.sh send <agent> TASK ...` — useful
+when the assignment is specific to one agent's expertise. For parallelizable
+work, prefer the task list: whichever coder is free will `claim` next.
+
+Post to status board when you've planned a batch:
 
 ```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" status orchestrator \
-  "ASSIGNED: <task> → <agent_id>"
+  "PLANNED: <n> tasks, entry point <task_id>"
 ```
 
 ## Step 4: Coordinate

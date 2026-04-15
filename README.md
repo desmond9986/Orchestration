@@ -115,6 +115,39 @@ orch-watch 3 10                     # refresh every 3s, show 10 lines per pane
 2. `orch-watch` to see if anyone is stuck
 3. `orch-status --follow` to follow the message stream
 
+## Shared task list
+
+For multi-step work, agents coordinate through `.agents/tasks.json` instead
+of ad-hoc TASK messages:
+
+```bash
+orch-task create "Design auth schema" --id t-schema
+orch-task create "Implement codec"    --depends t-schema
+orch-task create "Write tests"        --depends t-schema
+
+orch-task list-available              # only shows tasks whose deps are done
+orch-task claim t-schema architect    # atomic — only one agent wins
+orch-task complete t-schema architect --note "schema.md committed"
+# → agents blocked on t-schema get a STATUS broadcast automatically
+```
+
+Claim conflicts are safe (mkdir-based mutex). Workers can self-serve from
+`list-available` instead of being hand-assigned.
+
+## Delivery modes
+
+By default, `protocol.sh send` writes to the target's JSONL inbox and prints
+`# CHECK INBOX (<id>)` in their pane — the agent polls. Set `ORCH_DELIVERY=push`
+to paste the full message directly into the target pane (no polling needed):
+
+```bash
+export ORCH_DELIVERY=push    # in your shell, before spawning
+orchestrate lean
+```
+
+Push mode is more responsive; notify mode is quieter and lets the agent batch.
+Inbox remains the audit trail either way.
+
 ## Teardown
 
 ```bash
@@ -161,8 +194,10 @@ Unknown models fall back to `shell`. Add more by editing
 
 ```
 ~/orchestration/
-├── bin/                 # orchestrate, add-agent, remove-agent, end-session, orch-status
-├── lib/                 # roster.sh, protocol.sh, spawn-agent.sh, tmux-helpers.sh, common.sh
+├── bin/                 # orchestrate, add-agent, remove-agent, end-session,
+│                        # orch-status, orch-send, orch-watch, orch-task
+├── lib/                 # roster.sh, protocol.sh, tasks.sh, spawn-agent.sh,
+│                        # tmux-helpers.sh, common.sh
 ├── roles/
 │   ├── _protocol.md     # shared communication protocol (prefixed to every agent)
 │   ├── core/            # atomic role definitions
@@ -195,6 +230,88 @@ bash $ORCHESTRATION_HOME/lib/protocol.sh status <your_id> "<message>"
 
 Message types: `TASK`, `STATUS`, `DONE`, `BLOCKED`, `QUESTION`,
 `REVIEW_REQUEST`, `VERDICT`, `INFO`.
+
+## Design decisions
+
+Why the toolkit is shaped the way it is. Each call-out is a fork in the road
+where the less-obvious option won.
+
+### Roles as markdown prompts, not CLI-native skills
+Every modern agent CLI has its own skill/extension system (Claude Code
+Skills, Codex skills, Gemini extensions, …). They're good for different
+problems than this one. Two reasons role files stay as plain markdown:
+
+1. **Seeded, not activated.** A role must be present in the agent's context
+   from the very first message — the agent *is* the role. Skills are
+   conditionally loaded at runtime based on the CLI's own routing logic;
+   that's the wrong trigger for identity.
+2. **One format across models.** A mixed team (Claude + Codex + Gemini) all
+   gets the exact same role prompt pasted at launch, no per-CLI porting.
+   The role says "you are a coder," not "here's a skill you might invoke."
+
+Skills still make sense *inside* a role — an agent wearing the `coder` role
+is free to call whatever Claude Skills / Codex skills its CLI exposes while
+doing the work.
+
+### Core + hats composition, not monolithic role files
+Real sessions vary: sometimes the orchestrator also does architecture;
+sometimes an architect is separate; sometimes a coder wears qa+reviewer hats
+solo. Splitting `core/<role>.md` (atomic identity) from `hats/<name>.md`
+(optional add-on duties, composed at launch via `--hats`) means the role
+library doesn't explode combinatorially as team shapes shift.
+
+### Dynamic roster lookup, not hardcoded pane IDs
+Tmux pane indices shift whenever a pane is added or removed. Every role
+re-reads `.agents/roster.json` via `roster.sh find-role <role>` before
+messaging. New agents appear automatically; departed agents are skipped.
+This is the single biggest source of "agent sent to the wrong place" bugs
+that the toolkit exists to eliminate.
+
+### File-based inbox + tmux notify, not raw tmux send-keys
+Pure tmux send-keys loses messages when a pane is busy, mangles multi-line
+payloads, and has no audit trail. Writing to `.agents/inbox/<id>.jsonl`
+first (durable), then notifying via tmux, gives us: delivery even when the
+target is mid-thought, a replayable audit log, and a recovery path if
+tmux delivery fails.
+
+### JSONL for inboxes, markdown for bus/status
+Two different readers, two different formats:
+- **Inbox** is parsed by agents → JSONL (`{id,ts,from,to,type,payload,read}`),
+  one object per line, queryable with `jq`. No regex on `[MSG ...]` headers.
+- **Bus + status** are read by humans → markdown timelines.
+- **Payload** stays a plain string — agents write prose, not structured data.
+
+### Two delivery modes (`notify` / `push`), selectable per session
+- `notify` (default): write inbox, print `# CHECK INBOX`. Agent polls when
+  convenient → quieter, lets the agent batch.
+- `push`: write inbox **and** paste the full message into the target pane
+  via `tmux load-buffer`/`paste-buffer -d`. No polling → more responsive.
+
+Inbox is written either way, so the audit trail is uniform.
+
+### Shared task list with atomic claims, not pure orchestrator-assigns
+Hand-assignment through the orchestrator is a bottleneck. A shared
+`.agents/tasks.json` with `claim`/`complete` lets free workers self-serve
+(`list-available`) while orchestrators focus on sequencing and unblocking.
+Dependents auto-unblock on complete via a STATUS broadcast.
+
+### mkdir-based mutex, not `flock`
+macOS's default bash is 3.2 and ships without `flock`. `mkdir` is atomic on
+all POSIX filesystems, works everywhere, and needs no dependency. Stale
+locks (>60s) are reaped automatically so a crashed agent can't wedge the
+task list.
+
+### Per-project state under `.agents/`, gitignored
+All session state (roster, inboxes, tasks, bus, archives) lives in the
+project directory, not in `~/orchestration/`. This lets the toolkit be
+shared across projects while each project has its own isolated session.
+`.agents/` is gitignored by default.
+
+### Three observability layers, not one
+`bus.md` (every message, full payload), `status.md` (one-line events), and
+`orch-watch` (live pane tails) each answer a different question: "what was
+said?", "where are we?", "is anyone stuck?". None of them subsumes the
+others in practice.
 
 ## Customizing
 
