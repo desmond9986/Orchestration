@@ -114,6 +114,12 @@ cmd_recommend() {
     return
   fi
 
+  if yn "Is this a large system change needing design, parallel coders, review, AND real-env QA all at once?"; then
+    recommend "full-team" \
+      "Maximum specialisation: orchestrator + architect + 2 coders + reviewer + qa. Use sparingly — coordination overhead is real."
+    return
+  fi
+
   recommend "lean" \
     "General-purpose default: orchestrator + 2 coders. Balanced for most feature work."
 }
