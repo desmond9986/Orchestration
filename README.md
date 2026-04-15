@@ -128,7 +128,13 @@ orch-task create "Write tests"        --depends t-schema
 orch-task list-available              # only shows tasks whose deps are done
 orch-task claim t-schema architect    # atomic — only one agent wins
 orch-task complete t-schema architect --note "schema.md committed"
-# → agents blocked on t-schema get a STATUS broadcast automatically
+# → any task whose deps just cleared (t-codec, t-tests here) is announced
+#   via STATUS broadcast so a free worker can claim it next
+
+# If you hit a blocker, flag it — blocked tasks are hidden from
+# list-available and can't be re-claimed until explicitly reopened:
+orch-task block   t-codec coder-1 --reason "upstream API is down"
+orch-task unblock t-codec coder-1 --note   "API back up"
 ```
 
 Claim conflicts are safe (mkdir-based mutex). Workers can self-serve from

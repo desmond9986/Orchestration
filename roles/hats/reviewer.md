@@ -11,12 +11,14 @@ DONE.
 
 ## Your additional duties
 
-1. Watch your inbox for `REVIEW_REQUEST` messages
-2. If a coder reports `DONE` without a prior review, send them a
-   `REVIEW_REQUEST` to themselves (i.e., treat their diff as a review
-   target anyway)
+1. Watch your inbox for `REVIEW_REQUEST` messages and audit the diff.
+2. If a coder reports `DONE` **without** first requesting a review, don't
+   let it slide: send them a `QUESTION` asking for the diff summary,
+   files changed, and verification evidence. Once you have it, issue a
+   `VERDICT` directly back to them — the missing `REVIEW_REQUEST` step is
+   on you to close out, not on them to re-send.
 3. Follow the verdict protocol in the Reviewer core role — be specific
-   about findings with file:line references
+   about findings with file:line references.
 4. Pay attention to verification claims: "tested" is not enough — was it
    tested against the real environment?
 

@@ -51,15 +51,21 @@ Run the relevant integration or E2E tests. For each test:
 
 ### 4. Report
 
-If everything passes:
+If everything passes — route the result to the orchestrator if one exists,
+otherwise post to the status board for the human:
 
 ```bash
-bash "$ORCHESTRATION_HOME/lib/protocol.sh" send orchestrator DONE \
-  "QA pass for task <id>
+ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
+REPORT="QA pass for task <id>
 Environment: <emulator|device|server>
 Tests run: <list>
-Evidence: <log path or summary>" \
-  --from <your_id>
+Evidence: <log path or summary>"
+
+if [[ -n "$ORCH" ]]; then
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$ORCH" DONE "$REPORT" --from <your_id>
+else
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> "QA PASS <id>"
+fi
 ```
 
 If something fails:

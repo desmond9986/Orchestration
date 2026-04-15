@@ -84,10 +84,15 @@ Save to `.agents/contracts/<name>.md`:
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
   "CONTRACT ready: <name> at .agents/contracts/<name>.md"
 
-bash "$ORCHESTRATION_HOME/lib/protocol.sh" send orchestrator INFO \
-  "Contract <name> ready at .agents/contracts/<name>.md. \
+ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
+if [[ -n "$ORCH" ]]; then
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$ORCH" INFO \
+    "Contract <name> ready at .agents/contracts/<name>.md. \
 Key decisions: <summary of important choices>" \
-  --from <your_id>
+    --from <your_id>
+fi
+# If there is no orchestrator, the status-board announcement above is enough —
+# the human and other agents will see it there.
 ```
 
 ### 5. Answer clarifications

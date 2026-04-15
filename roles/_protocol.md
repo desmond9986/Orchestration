@@ -11,8 +11,10 @@ the bug-prone parts — **use them, do not craft tmux commands yourself.**
 2. **Use the helper scripts.** They handle Enter keys, delivery checks, and
    logging automatically.
 3. **Every message has a type.** Be explicit about what you want.
-4. **Status updates are broadcast.** Write to the status board often so the
-   human and other agents can follow along.
+4. **Status updates go to the shared status board** (`.agents/status.md`) via
+   `protocol.sh status`. That's a file anyone can read — it is not a
+   broadcast message. Direct peer notification uses `send` or `broadcast`,
+   which are separate channels.
 
 ## Discovering Your Team
 
@@ -96,9 +98,16 @@ bash "$ORCHESTRATION_HOME/lib/tasks.sh" claim <task_id> <your_id>
 # Mark done (broadcasts STATUS to any task whose deps just cleared)
 bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete <task_id> <your_id> --note "<summary>"
 
-# Block if you can't proceed
+# Block if you can't proceed (only the claimer may block a claimed task)
 bash "$ORCHESTRATION_HOME/lib/tasks.sh" block <task_id> <your_id> --reason "<why>"
+
+# Reopen a blocked task once the blocker is resolved. Task returns to pending,
+# owner is cleared, and availability is broadcast so any free worker can claim.
+bash "$ORCHESTRATION_HOME/lib/tasks.sh" unblock <task_id> <your_id> --note "<resolution>"
 ```
+
+`blocked` is terminal until `unblock` — a blocked task does not appear in
+`list-available` and cannot be re-claimed directly.
 
 Orchestrators/architects `create` tasks with `--depends <id,id>` to express
 ordering. Workers prefer `list-available` over being hand-assigned individual

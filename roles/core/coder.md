@@ -113,15 +113,22 @@ bash "$ORCHESTRATION_HOME/lib/tasks.sh" complete <task_id> <your_id> \
   --note "Changed: <files>; Tested: <env>"
 ```
 
-Also notify the orchestrator (or human if none):
+Also notify the orchestrator if one exists — don't hardcode the id, look it up:
 
 ```bash
-bash "$ORCHESTRATION_HOME/lib/protocol.sh" send orchestrator DONE \
-  "Task: <id>
+ORCH=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role orchestrator | head -1)
+if [[ -n "$ORCH" ]]; then
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$ORCH" DONE \
+    "Task: <id>
 Changed: <files>
 Tested: <what you verified, and against what environment>
 Unresolved: <anything left, or 'none'>" \
-  --from <your_id>
+    --from <your_id>
+else
+  # No orchestrator — surface to the human via the status board.
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" status <your_id> \
+    "DONE <id>: <files>; tested <env>"
+fi
 ```
 
 ## When you hit trouble
