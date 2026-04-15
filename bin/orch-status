@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# orch-status — show the live status of the current orchestration session.
+# orch-status — show the live state of the current orchestration session.
 #
 # Usage:
-#   orch-status              # show roster + recent status lines
-#   orch-status --follow     # tail -f status board
-#   orch-status --roster     # just the roster
-#   orch-status --inbox <id> # peek an agent's inbox
-#   orch-status --log        # show log (errors, delivery failures)
+#   orch-status                  # roster + last 20 bus messages
+#   orch-status --bus            # print the full message bus
+#   orch-status --follow         # tail -f the message bus (live view of ALL messages)
+#   orch-status --status         # summary status board (one-line events)
+#   orch-status --follow-status  # tail -f the status board
+#   orch-status --roster         # just the roster (who's active)
+#   orch-status --inbox <id>     # peek an agent's unread inbox
+#   orch-status --log            # show log (errors, delivery failures)
 
 set -euo pipefail
 : "${ORCHESTRATION_HOME:=$HOME/orchestration}"
@@ -19,7 +22,20 @@ export ORCH_PROJECT="$PWD"
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
+  --bus)
+    [[ -f "$(bus_file)" ]] || die "no session here"
+    cat "$(bus_file)"
+    ;;
   --follow)
+    [[ -f "$(bus_file)" ]] || die "no session here"
+    info "following message bus (Ctrl-C to stop)"
+    tail -f "$(bus_file)"
+    ;;
+  --status)
+    [[ -f "$(status_file)" ]] || die "no session here"
+    cat "$(status_file)"
+    ;;
+  --follow-status)
     [[ -f "$(status_file)" ]] || die "no session here"
     tail -f "$(status_file)"
     ;;
@@ -40,8 +56,10 @@ case "${1:-}" in
     printf "${C_BOLD}Roster:${C_RESET}\n"
     bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
     echo ""
-    printf "${C_BOLD}Recent status:${C_RESET}\n"
-    tail -20 "$(status_file)" 2>/dev/null || echo "(none)"
+    printf "${C_BOLD}Recent bus activity (last 20 lines):${C_RESET}\n"
+    tail -20 "$(bus_file)" 2>/dev/null || echo "(none)"
+    echo ""
+    printf "${C_DIM}tip: run 'orch-status --follow' to watch live${C_RESET}\n"
     ;;
   *) die "unknown option: $1 (try: orch-status --help)" ;;
 esac

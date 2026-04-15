@@ -74,13 +74,28 @@ new agents appear automatically, left agents are skipped.
 
 ## Observing the session
 
+Every inter-agent message is mirrored to a shared **bus log**
+(`.agents/bus.md`) so you can see the whole conversation from any terminal.
+
 ```bash
-orch-status                         # roster + recent status
-orch-status --follow                # tail -f status board
+orch-status                         # roster + last 20 bus messages
+orch-status --follow                # tail -f bus log (live view of ALL messages)
+orch-status --bus                   # print full bus
+orch-status --status                # one-line summary status board
 orch-status --roster                # just the roster
-orch-status --inbox <id>            # peek an agent's inbox
+orch-status --inbox <id>            # peek an agent's unread inbox
 orch-status --log                   # delivery errors, retries
 ```
+
+Two visibility layers:
+
+| File | Content | Best for |
+|---|---|---|
+| `.agents/bus.md` | Full payload of every message, chronological | Following the actual conversation |
+| `.agents/status.md` | One-line per event (SENT, ASSIGNED, DONE, etc.) | High-level timeline |
+
+Open a spare terminal in the project and run `orch-status --follow` to
+watch agents talk to each other live.
 
 ## Teardown
 

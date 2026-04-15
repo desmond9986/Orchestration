@@ -18,6 +18,7 @@ agents_dir() {
 
 roster_file()  { echo "$(agents_dir)/roster.json"; }
 status_file()  { echo "$(agents_dir)/status.md"; }
+bus_file()     { echo "$(agents_dir)/bus.md"; }
 log_file()     { echo "$(agents_dir)/log.md"; }
 inbox_dir()    { echo "$(agents_dir)/inbox"; }
 prompts_dir()  { echo "$(agents_dir)/prompts"; }
@@ -46,7 +47,19 @@ require_cmd() {
 ensure_agents_dir() {
   mkdir -p "$(agents_dir)" "$(inbox_dir)" "$(prompts_dir)" "$(contracts_dir)"
   [[ -f "$(status_file)" ]] || : > "$(status_file)"
+  [[ -f "$(bus_file)" ]] || : > "$(bus_file)"
   [[ -f "$(log_file)" ]] || : > "$(log_file)"
+}
+
+bus_line() {
+  # Append a full chronological message record to the shared bus log.
+  # Args: from to type id payload
+  local from="$1" to="$2" type="$3" id="$4"; shift 4
+  local payload="$*"
+  {
+    printf "\n[%s] %s → %s  [%s]  id=%s\n" "$(ts_short)" "$from" "$to" "$type" "$id"
+    printf "%s\n" "$payload" | sed 's/^/  /'
+  } >> "$(bus_file)"
 }
 
 log_line() {

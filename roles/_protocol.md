@@ -84,6 +84,17 @@ Your team composition is **not fixed**. If a role you expect is absent:
 
 Do not assume a role exists — always check the roster.
 
+## Observability (what the human sees)
+
+Every message you send (via `protocol.sh send` or `broadcast`) is
+automatically mirrored to `.agents/bus.md` — the shared message bus.
+The human watches this file to follow the whole conversation in real time.
+
+This means you **do not need to CC the human** on messages; they see
+everything. But do post periodic STATUS updates via
+`protocol.sh status <your_id> "<msg>"` so the summary status board
+(`.agents/status.md`) stays readable as a high-level timeline.
+
 ## Fail-Safe Logging
 
 If something goes wrong (delivery failure, missing agent, unexpected state):

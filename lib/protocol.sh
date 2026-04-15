@@ -60,9 +60,13 @@ cmd_send() {
     printf "[END]\n"
   } >> "$inbox"
 
+  # Mirror every message to the shared bus log so the human sees everything.
+  bus_line "$from" "$to" "$type" "$msg_id" "$payload"
+
+  status_line "$from" "SENT $type → $to (id=$msg_id)"
+
   if deliver_notify "$target" "$to"; then
     ok "sent → $to [$type] id=$msg_id"
-    status_line "$from" "SENT $type → $to (id=$msg_id)"
   else
     warn "wrote to inbox but tmux notify failed for $to ($target)"
     log_line "NOTIFY_FAIL: $to target=$target msg=$msg_id"
