@@ -111,17 +111,38 @@ PROMPT_FILE="$(prompts_dir)/$ID.md"
 # Ensure session exists
 init_session "$SESSION" >/dev/null
 
-# For the FIRST agent, reuse pane 0.0; otherwise split.
-existing_count=$(tmux list-panes -t "$SESSION:0" 2>/dev/null | wc -l | tr -d ' ')
-active_count=$(jq '[.agents[] | select(.status=="active")] | length' "$(roster_file)")
-
-if (( active_count == 0 )); then
+# Layout: orchestrator → window 0 (solo pane, human talks here most).
+#         everyone else → window 1, tiled, max 4 panes; overflow → window 2.
+if [[ "$ROLE" == "orchestrator" ]]; then
   TARGET="$SESSION:0.0"
 else
-  TARGET=$(new_pane "$SESSION")
+  # Pick target window: use window 1 unless it already has 4 panes.
+  ensure_window "$SESSION" 1
+  pane_count_1=$(tmux list-panes -t "$SESSION:1" 2>/dev/null | wc -l | tr -d ' ')
+  if (( pane_count_1 < 4 )); then
+    WIN=1
+  else
+    ensure_window "$SESSION" 2
+    WIN=2
+  fi
+  # First pane in the window reuses the existing shell; subsequent ones split.
+  pane_count=$(tmux list-panes -t "$SESSION:$WIN" 2>/dev/null | wc -l | tr -d ' ')
+  if (( pane_count <= 1 )); then
+    # Reuse the lone shell pane that new-window created
+    TARGET="$SESSION:$WIN.0"
+  else
+    TARGET=$(new_pane "$SESSION" "$WIN")
+  fi
 fi
 
 set_pane_title "$TARGET" "$ID"
+
+# Name the tmux window tab for easy navigation.
+if [[ "$ROLE" == "orchestrator" ]]; then
+  tmux rename-window -t "$SESSION:0" "orchestrator" 2>/dev/null || true
+else
+  tmux rename-window -t "$SESSION:$WIN" "agents" 2>/dev/null || true
+fi
 
 # Register in roster
 ADD_ARGS=("$ID" "$ROLE" "$MODEL" "$TARGET")

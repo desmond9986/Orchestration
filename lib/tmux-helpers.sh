@@ -26,31 +26,43 @@ init_session() {
   echo "$session"
 }
 
-# Create a new pane in a session by splitting the last pane.
-# Args: session_name
+# Ensure a tmux window exists in a session. Creates it if absent.
+# Args: session_name window_index
+ensure_window() {
+  local session="$1" win="$2"
+  local cwd; cwd="$(project_root)"
+  if ! tmux list-windows -t "$session" -F "#{window_index}" 2>/dev/null | grep -qx "$win"; then
+    tmux new-window -d -t "$session:$win" -c "$cwd"
+    ok "tmux window $win created in session $session"
+  fi
+}
+
+# Create a new pane in a session by splitting the last pane in the given window.
+# Args: session_name [window_index=0]
 # Echoes the new tmux target (session:window.pane)
 new_pane() {
   local session="$1"
+  local win="${2:-0}"
   local cwd; cwd="$(project_root)"
-  # Find last pane in window 0
+  # Find last pane in target window
   local last_pane
-  last_pane=$(tmux list-panes -t "$session:0" -F "#{pane_index}" | tail -1)
+  last_pane=$(tmux list-panes -t "$session:$win" -F "#{pane_index}" 2>/dev/null | tail -1)
   if [[ -z "$last_pane" ]]; then
-    echo "$session:0.0"
+    echo "$session:$win.0"
     return
   fi
   # Split horizontally if pane count even, vertically if odd (rough tile)
   local count
-  count=$(tmux list-panes -t "$session:0" | wc -l | tr -d ' ')
+  count=$(tmux list-panes -t "$session:$win" 2>/dev/null | wc -l | tr -d ' ')
   if (( count % 2 == 0 )); then
-    tmux split-window -h -t "$session:0.$last_pane" -c "$cwd"
+    tmux split-window -h -t "$session:$win.$last_pane" -c "$cwd"
   else
-    tmux split-window -v -t "$session:0.$last_pane" -c "$cwd"
+    tmux split-window -v -t "$session:$win.$last_pane" -c "$cwd"
   fi
-  tmux select-layout -t "$session:0" tiled >/dev/null
+  tmux select-layout -t "$session:$win" tiled >/dev/null
   local new_idx
-  new_idx=$(tmux list-panes -t "$session:0" -F "#{pane_index}" | tail -1)
-  echo "$session:0.$new_idx"
+  new_idx=$(tmux list-panes -t "$session:$win" -F "#{pane_index}" | tail -1)
+  echo "$session:$win.$new_idx"
 }
 
 # Send a multi-line prompt to a pane reliably via paste-buffer.
