@@ -169,10 +169,11 @@ ADD_ARGS=("$ID" "$ROLE" "$MODEL" "$TARGET")
 [[ -n "$PARENT" ]] && ADD_ARGS+=("--parent" "$PARENT")
 bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
 
-# Launch the CLI bare — prompts are pasted via tmux paste-buffer afterward so
-# we never hit argv length limits (ARG_MAX ~256KB on macOS, and some CLIs cap
-# input well below that). Prompts grow with project context — passing the
-# whole thing as one argv string is fragile.
+# Build the CLI launch command.
+# For claude: role is loaded via --append-system-prompt-file (reliable, no
+# paste timing issues with the welcome dialog). A short kick-off message is
+# sent after the CLI is ready instead of pasting the full file.
+# For codex/others: paste the prompt file the old way (no equivalent flag).
 launch_cli_cmd() {
   local model="$1"
   # Per-role var wins; fall back to global flag; default to 0.
@@ -182,8 +183,9 @@ launch_cli_cmd() {
   skip="${skip:-${ORCH_SKIP_PERMISSIONS:-0}}"
   case "$model" in
     claude)
-      if [[ "$skip" == "1" ]]; then echo "claude --dangerously-skip-permissions"
-      else echo "claude"; fi
+      local flags="--append-system-prompt-file '$PROMPT_FILE'"
+      if [[ "$skip" == "1" ]]; then flags="--dangerously-skip-permissions $flags"; fi
+      echo "claude $flags"
       ;;
     codex)
       if [[ "$skip" == "1" ]]; then echo "codex --yolo"
@@ -206,13 +208,27 @@ send_line "$TARGET" "echo '===== agent: $ID ($ROLE$([[ -n "$HATS" ]] && echo " +
 send_line "$TARGET" "echo 'prompt: $PROMPT_FILE'"
 send_line "$TARGET" "$LAUNCH_CMD"
 
-# Paste the prompt as the agent's first input (only for real CLIs).
+# Deliver the role context to the agent once it's ready.
 case "$MODEL" in
   shell|none) : ;;
+  claude)
+    # Role already in system prompt via --append-system-prompt-file.
+    # Wait for startup rendering to settle.
+    wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID"
+    # Dismiss trust-folder dialog if present (new/untrusted directories).
+    # Sending Enter selects "Yes, I trust this folder".
+    if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q "trust this folder"; then
+      tmux send-keys -t "$TARGET" "" Enter
+    fi
+    # Wait specifically for the ❯ input prompt to be visible.
+    # wait_for_cli_ready can return on a transient stable state (blank screen
+    # between trust dismissal and the actual chat UI appearing). Checking for
+    # ❯ ensures we don't send the kick-off too early.
+    wait_for_input_prompt "$TARGET" || warn "input prompt not visible for $ID — kicking off anyway"
+    tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+    ;;
   *)
-    # Wait for the CLI to stop repainting, then paste the prompt. On timeout
-    # (ORCH_CLI_READY_MAX, default 8s), paste anyway — preserves original
-    # best-effort behavior.
+    # codex / gemini: paste the full prompt file as the first message.
     wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID — pasting anyway"
     paste_to_pane "$TARGET" "$PROMPT_FILE"
     ;;

@@ -164,6 +164,27 @@ wait_for_cli_ready() {
   return 1
 }
 
+# Wait until the claude input prompt (❯) is visible in the pane.
+# More reliable than wait_for_cli_ready for the period between trust-dialog
+# dismissal and the chat input becoming ready: hash can briefly stabilise on
+# an intermediate (blank/loading) screen before the prompt appears.
+#
+# Usage: wait_for_input_prompt <target> [max_seconds]
+wait_for_input_prompt() {
+  local target="$1"
+  local max="${2:-${ORCH_CLI_READY_MAX:-8}}"
+  local deadline=$(( $(date +%s) + max ))
+  while (( $(date +%s) < deadline )); do
+    # Match the bare chat input prompt (❯ with optional trailing spaces/cursor)
+    # but NOT the trust-dialog option line (❯ 1. Yes, I trust this folder).
+    if tmux capture-pane -p -t "$target" 2>/dev/null | grep -qE '^❯[[:space:]]*$'; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
 # Attach (foreground) — if already inside tmux, switch instead.
 attach_session() {
   local session="$1"
