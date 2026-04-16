@@ -138,8 +138,13 @@ else
       ensure_window "$SESSION" 2
       WIN=2
     fi
-    pane_count=$(tmux list-panes -t "$SESSION:$WIN" 2>/dev/null | wc -l | tr -d ' ')
-    if (( pane_count <= 1 )); then
+    # Use the roster to determine occupancy, not pane count. tmux pane count
+    # stays at 1 even after the first agent reuses pane 0 — checking it would
+    # assign every subsequent agent to the same pane.
+    agents_in_win=$(jq --arg pat "$SESSION:$WIN\\." \
+      '[.agents[] | select(.status=="active") | select(.target != null) | select(.target | test($pat))] | length' \
+      "$(roster_file)")
+    if (( agents_in_win == 0 )); then
       TARGET="$SESSION:$WIN.0"
     else
       TARGET=$(new_pane "$SESSION" "$WIN")
@@ -173,7 +178,7 @@ launch_cli_cmd() {
   # Per-role var wins; fall back to global flag; default to 0.
   # Nested ${!var:-${other:-0}} is not reliable in bash 3.2; resolve in steps.
   local role_var="ORCH_SKIP_PERMISSIONS_${ROLE}"
-  local skip="${!role_var}"
+  local skip="${!role_var:-}"
   skip="${skip:-${ORCH_SKIP_PERMISSIONS:-0}}"
   case "$model" in
     claude)

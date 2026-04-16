@@ -249,6 +249,86 @@ test_concurrency() {
   rm -rf "$dir"
 }
 
+# ── spawn layout ─────────────────────────────────────────────────────────
+# Tests the pane-assignment logic in spawn-agent.sh.
+# Uses an isolated tmux server so it never touches live sessions.
+test_spawn_layout() {
+  printf "\n\033[1mspawn layout\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  # Source helpers so roster_file() and friends are available.
+  set +e
+  source "$ORCHESTRATION_HOME/lib/common.sh"
+  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+  set +e
+
+  # Wrap tmux through an isolated server so test panes never appear live.
+  # Resolve the real tmux binary path before overriding PATH.
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-layout-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_layout() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  local sess="layout-$$"
+  tmux new-session -d -s "$sess" -x 220 -y 50
+
+  # ── split layout (>4 agents): each agent must get a unique pane ──────
+  # Don't use fresh_project — it inits a 'smoke' session which would collide.
+  ORCH_PROJECT=$(mktemp -d)
+  export ORCH_PROJECT
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$sess" >/dev/null
+
+  export ORCH_TOTAL_AGENTS=6
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" orchestrator orchestrator none --session "$sess"
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" architect    architect    none --session "$sess"
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" coder-1      coder        none --session "$sess"
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" coder-2      coder        none --session "$sess"
+
+  local targets distinct
+  targets=$(jq -r '.agents[].target' "$(roster_file)")
+  distinct=$(echo "$targets" | sort -u | wc -l | tr -d ' ')
+  assert_eq "4" "$distinct" "split layout: 4 agents → 4 distinct panes"
+
+  local orch_target arch_target
+  orch_target=$(jq -r '.agents[] | select(.id=="orchestrator") | .target' "$(roster_file)")
+  arch_target=$(jq -r '.agents[] | select(.id=="architect")    | .target' "$(roster_file)")
+  assert_contains "$orch_target" ":0." "split layout: orchestrator lands in window 0"
+  assert_contains "$arch_target" ":1." "split layout: non-orchestrator lands in window 1"
+
+  unset ORCH_TOTAL_AGENTS
+  rm -rf "$ORCH_PROJECT"
+  tmux kill-session -t "$sess" 2>/dev/null || true
+
+  # ── set -u safety: skip-permissions var unset must not crash ─────────
+  local rc=0
+  bash -c '
+    set -euo pipefail
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    # Simulate launch_cli_cmd with no ORCH_SKIP_PERMISSIONS_coder exported.
+    unset ORCH_SKIP_PERMISSIONS_coder 2>/dev/null || true
+    ROLE=coder
+    role_var="ORCH_SKIP_PERMISSIONS_${ROLE}"
+    skip="${!role_var:-}"
+    skip="${skip:-${ORCH_SKIP_PERMISSIONS:-0}}"
+    echo "$skip"
+  ' >/dev/null || rc=$?
+  assert_eq "0" "$rc" "skip-permissions: unset per-role var does not crash under set -u"
+
+  cleanup_layout
+}
+
 # ── tmux readiness poll ──────────────────────────────────────────────────
 # Skips if tmux is unavailable. Uses an isolated tmux server via -L so it
 # doesn't touch any live session.
@@ -397,7 +477,8 @@ case "$SUITE" in
   concurrency)  test_concurrency ;;
   end-session)  test_end_session ;;
   model-select) test_model_select ;;
-  all)          test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_model_select; test_tmux_ready ;;
+  spawn-layout) test_spawn_layout ;;
+  all)          test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_model_select; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 
