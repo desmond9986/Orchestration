@@ -164,10 +164,17 @@ fi
 info "starting pattern '$PATTERN' in $PWD"
 bash "$PATTERN_FILE" "$@"
 
-# After the pattern has spawned everyone, attach.
+# After the pattern has spawned everyone, print how to view the session.
+# Do NOT auto-switch — if the user is already inside tmux, switching client
+# would make their existing panes disappear from view.
 SESSION=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" session 2>/dev/null || echo "")
 if [[ -n "$SESSION" ]]; then
-  ok "session '$SESSION' ready — attaching"
-  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
-  attach_session "$SESSION"
+  ok "session '$SESSION' ready"
+  if [[ -n "${TMUX:-}" ]]; then
+    info "already inside tmux — switch with: tmux switch-client -t '$SESSION'"
+    info "or press Ctrl-B, S to pick a session"
+  else
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    attach_session "$SESSION"
+  fi
 fi
