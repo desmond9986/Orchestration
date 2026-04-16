@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Smoke tests for roster, protocol, and tasks libraries.
 #
-# Runs each lib against a temp project dir. No tmux delivery is exercised —
-# we only verify file-state correctness and the state machines. Push delivery,
-# spawn-agent, and end-session are covered separately by manual runs.
+# Runs lib smoke coverage against a temp project dir. Includes isolated tmux
+# suites for readiness, layout, and notify delivery behavior.
 #
 # Usage:
 #   tests/smoke.sh                  # run all
@@ -106,8 +105,121 @@ test_protocol() {
   peek=$(bash "$ORCHESTRATION_HOME/lib/protocol.sh" peek-inbox a2)
   assert_contains "$peek" "hello" "peek-inbox renders payload"
   assert_contains "$peek" "[TASK]" "peek-inbox renders type"
+  assert_contains "$peek" "FROM: a1" "peek-inbox renders sender"
+  assert_contains "$peek" "TO:   a2" "peek-inbox renders recipient"
+  local read_out
+  read_out=$(bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox a2)
+  assert_contains "$read_out" "FROM: a1" "check-inbox renders sender"
+  assert_contains "$read_out" "TO:   a2" "check-inbox renders recipient"
+  local arch
+  arch=$(bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-archive a2)
+  assert_contains "$arch" "hello" "check-archive renders archived payload"
+  assert_contains "$arch" "FROM: a1" "check-archive renders sender"
 
   rm -rf "$dir"
+}
+
+# ── protocol notify via tmux ─────────────────────────────────────────────
+# Exercises the real notify path with isolated tmux socket:
+# - sender hint is printed
+# - notify does not auto-run check-inbox
+# - metacharacter ids do not get executed as shell fragments
+test_protocol_notify_tmux() {
+  printf "\n\033[1mprotocol notify (tmux)\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-proto-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_proto_tmux() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+  trap cleanup_proto_tmux RETURN
+
+  ORCH_PROJECT=$(mktemp -d)
+  export ORCH_PROJECT
+  local sess="proto-$$"
+  tmux new-session -d -s "$sess" -c "$ORCH_PROJECT" -x 120 -y 30
+  tmux split-window -h -t "$sess:0.0" -c "$ORCH_PROJECT"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$sess" >/dev/null
+
+  local to_id="rcvr"
+  local sender_target="$sess:0.0"
+  local rcvr_target="$sess:0.1"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add sender coder claude "$sender_target" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$to_id" coder claude "$rcvr_target" >/dev/null
+
+  # Notify must not execute whatever text is currently typed in the receiver pane.
+  tmux send-keys -t "$rcvr_target" "touch prehint_should_not_run"
+
+  # Notify should queue the message and hint in pane, without auto-reading inbox.
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$to_id" INFO "m1" --from sender >/dev/null 2>&1 || true
+  if [[ -f "$ORCH_PROJECT/prehint_should_not_run" ]]; then
+    fail "notify must not submit pre-typed receiver input"
+  else
+    pass "notify does not submit pre-typed receiver input"
+  fi
+  local tries=0
+  local max_tries=60
+  local inbox_file
+  inbox_file="$ORCH_PROJECT/.agents/inbox/$to_id.jsonl"
+  local arch_file
+  arch_file="$ORCH_PROJECT/.agents/inbox/$to_id.archive.jsonl"
+  while (( tries < max_tries )); do
+    local inbox_lines=0
+    [[ -f "$inbox_file" ]] && inbox_lines=$(wc -l < "$inbox_file" | tr -d ' ')
+    if (( inbox_lines >= 1 )); then
+      break
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  local inbox_lines=0 arch_lines=0
+  [[ -f "$inbox_file" ]] && inbox_lines=$(wc -l < "$inbox_file" | tr -d ' ')
+  [[ -f "$arch_file" ]] && arch_lines=$(wc -l < "$arch_file" | tr -d ' ')
+  assert_eq "1" "$inbox_lines" "notify keeps message unread by default"
+  assert_eq "0" "$arch_lines" "notify does not archive without check-inbox"
+
+  local pane sender_pane
+  pane=$(tmux capture-pane -p -t "$rcvr_target" 2>/dev/null)
+  sender_pane=$(tmux capture-pane -p -t "$sender_target" 2>/dev/null)
+  assert_contains "$pane" "# CHECK INBOX" "notify prints check-inbox hint in receiver pane"
+  assert_contains "$pane" "from:sender" "notify hint includes sender id"
+  if [[ "$sender_pane" == *"# CHECK INBOX"* ]]; then
+    fail "notify must target receiver pane, not sender pane"
+  else
+    pass "notify targets receiver pane only"
+  fi
+
+  # Metacharacter id must not execute shell fragments in the receiver pane.
+  local evil_id='evil; touch pwned_marker'
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$evil_id" coder claude "$rcvr_target" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$evil_id" INFO "m2" --from sender >/dev/null 2>&1 || true
+  tries=0
+  while (( tries < max_tries )); do
+    [[ -f "$ORCH_PROJECT/pwned_marker" ]] && break
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  if [[ -f "$ORCH_PROJECT/pwned_marker" ]]; then
+    fail "notify hint must not execute metacharacters in agent id"
+  else
+    pass "notify hint safely escapes metacharacter ids"
+  fi
+
+  rm -rf "$ORCH_PROJECT"
+  trap - RETURN
+  cleanup_proto_tmux
 }
 
 # ── tasks ────────────────────────────────────────────────────────────────
@@ -478,7 +590,8 @@ case "$SUITE" in
   end-session)  test_end_session ;;
   model-select) test_model_select ;;
   spawn-layout) test_spawn_layout ;;
-  all)          test_roster; test_protocol; test_tasks; test_concurrency; test_end_session; test_model_select; test_spawn_layout; test_tmux_ready ;;
+  protocol-notify-tmux) test_protocol_notify_tmux ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

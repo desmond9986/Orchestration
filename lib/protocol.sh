@@ -5,6 +5,7 @@
 #   protocol.sh send <to_id> <TYPE> "<payload>" [--from <from_id>]
 #   protocol.sh check-inbox <your_id>      # prints + archives unread messages
 #   protocol.sh peek-inbox <your_id>       # prints without archiving
+#   protocol.sh check-archive <your_id>    # prints archived messages
 #   protocol.sh broadcast <TYPE> "<payload>" [--from <id>]    # send to all active
 #   protocol.sh status <your_id> "<msg>"   # write to status board
 #
@@ -12,6 +13,7 @@
 #   notify  (default) — write to inbox, print "# CHECK INBOX" in target pane
 #   push              — write to inbox AND paste the full message into target pane
 #   silent            — write to inbox only, no tmux interaction
+#
 #
 # Inbox format: JSON Lines (.jsonl). One object per message:
 #   {"id","ts","from","to","type","payload","read":false}
@@ -33,12 +35,25 @@ new_msg_id() { echo "msg-$(date +%s)-$RANDOM"; }
 inbox_path()   { echo "$(inbox_dir)/$1.jsonl"; }
 archive_path() { echo "$(inbox_dir)/$1.archive.jsonl"; }
 
+# Strip control chars before echoing values into interactive panes.
+# Keeps logs readable and prevents terminal escape/control injection.
+sanitize_for_pane() {
+  printf "%s" "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+}
+
 deliver_notify() {
   # Minimal notification: blank line + "# CHECK INBOX (id)".
-  local target="$1" id="$2"
+  local target="$1" id="$2" from="${3:-unknown}"
+  local safe_id safe_from
+  safe_id=$(sanitize_for_pane "$id")
+  safe_from=$(sanitize_for_pane "$from")
+  safe_id="${safe_id//$'\n'/ }"; safe_id="${safe_id//$'\r'/ }"
+  safe_from="${safe_from//$'\n'/ }"; safe_from="${safe_from//$'\r'/ }"
   tmux has-session -t "${target%%:*}" 2>/dev/null || return 1
-  tmux send-keys -t "$target" "" Enter 2>/dev/null || return 1
-  tmux send-keys -t "$target" "# CHECK INBOX ($id)" Enter 2>/dev/null || return 1
+  # Clear any partially typed line so notify never submits stale input.
+  tmux send-keys -t "$target" C-u 2>/dev/null || return 1
+  tmux send-keys -t "$target" "# CHECK INBOX ($safe_id) from:$safe_from" 2>/dev/null || return 1
+  tmux send-keys -t "$target" C-m 2>/dev/null || return 1
   return 0
 }
 
@@ -65,7 +80,7 @@ deliver_push() {
   local buf="orch-msg-$(date +%s%N)"
   tmux load-buffer -b "$buf" "$tmpf"
   tmux paste-buffer -b "$buf" -t "$target" -d 2>/dev/null || { rm -f "$tmpf"; return 1; }
-  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  tmux send-keys -t "$target" C-m 2>/dev/null || true
   rm -f "$tmpf"
   return 0
 }
@@ -110,7 +125,7 @@ cmd_send() {
     push)
       if deliver_push "$target" "$json_line"; then
         ok "pushed → $to [$type] id=$msg_id"
-      elif deliver_notify "$target" "$to"; then
+      elif deliver_notify "$target" "$to" "$from"; then
         warn "push failed, fell back to notify for $to"
       else
         warn "wrote to inbox but tmux delivery failed for $to ($target)"
@@ -118,7 +133,7 @@ cmd_send() {
       fi
       ;;
     notify|*)
-      if deliver_notify "$target" "$to"; then
+      if deliver_notify "$target" "$to" "$from"; then
         ok "sent → $to [$type] id=$msg_id"
       else
         warn "wrote to inbox but tmux notify failed for $to ($target)"
@@ -139,10 +154,11 @@ cmd_broadcast() {
   done
   local ids
   ids=$(jq -r '.agents[] | select(.status=="active") | .id' "$(roster_file)")
-  for id in $ids; do
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
     [[ "$id" == "$from" ]] && continue
     cmd_send "$id" "$type" "$payload" --from "$from"
-  done
+  done <<< "$ids"
 }
 
 cmd_check_inbox() {
@@ -164,7 +180,7 @@ cmd_check_inbox() {
     return 0
   fi
   jq -r '
-    "\n[\(.ts)] \(.from) → \(.to)  [\(.type)]  id=\(.id)\n\(.payload)\n[END]"
+    "\n[\(.ts)] id=\(.id) type=[\(.type)]\nFROM: \(.from)\nTO:   \(.to)\n\(.payload)\n[END]"
   ' "$snapshot"
   cat "$snapshot" >> "$archive"
   rm -f "$snapshot"
@@ -178,8 +194,20 @@ cmd_peek_inbox() {
     echo "(inbox empty)"
   else
     jq -r '
-      "\n[\(.ts)] \(.from) → \(.to)  [\(.type)]  id=\(.id)\n\(.payload)\n[END]"
+      "\n[\(.ts)] id=\(.id) type=[\(.type)]\nFROM: \(.from)\nTO:   \(.to)\n\(.payload)\n[END]"
     ' "$inbox"
+  fi
+}
+
+cmd_check_archive() {
+  local id="$1"
+  local archive; archive=$(archive_path "$id")
+  if [[ ! -s "$archive" ]]; then
+    echo "(archive empty)"
+  else
+    jq -r '
+      "\n[\(.ts)] id=\(.id) type=[\(.type)]\nFROM: \(.from)\nTO:   \(.to)\n\(.payload)\n[END]"
+    ' "$archive"
   fi
 }
 
@@ -197,6 +225,7 @@ case "$CMD" in
   broadcast)    cmd_broadcast "$@" ;;
   check-inbox)  cmd_check_inbox "$@" ;;
   peek-inbox)   cmd_peek_inbox "$@" ;;
+  check-archive) cmd_check_archive "$@" ;;
   status)       cmd_status "$@" ;;
   help|-h|--help) cmd_help ;;
   *) die "unknown command: $CMD (try: protocol.sh help)" ;;
