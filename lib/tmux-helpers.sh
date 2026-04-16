@@ -185,11 +185,13 @@ wait_for_input_prompt() {
   return 1
 }
 
-# Attach (foreground) — if already inside tmux, switch instead.
+# Attach to a session from outside tmux. If already inside tmux, print
+# instructions instead — switching client hijacks the user's current view.
 attach_session() {
   local session="$1"
   if [[ -n "${TMUX:-}" ]]; then
-    tmux switch-client -t "$session"
+    info "already inside tmux — switch with: tmux switch-client -t '$session'"
+    info "or press Ctrl-B, S to pick a session"
   else
     tmux attach-session -t "$session"
   fi
