@@ -12,6 +12,7 @@ set -euo pipefail
 source "$ORCHESTRATION_HOME/lib/common.sh"
 
 SESSION="debug-squad"
+export ORCH_TOTAL_AGENTS=4
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 
 bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" orchestrator orchestrator "${ORCH_MODEL_orchestrator:-claude}"

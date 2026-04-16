@@ -22,6 +22,7 @@ set -euo pipefail
 source "$ORCHESTRATION_HOME/lib/common.sh"
 
 SESSION="pipeline"
+export ORCH_TOTAL_AGENTS=4
 
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 

@@ -11,6 +11,7 @@ set -euo pipefail
 source "$ORCHESTRATION_HOME/lib/common.sh"
 
 SESSION="review-loop"
+export ORCH_TOTAL_AGENTS=2
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 
 bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" coder-1  coder    "${ORCH_MODEL_coder:-claude}"

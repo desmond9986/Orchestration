@@ -18,6 +18,7 @@ source "$ORCHESTRATION_HOME/lib/common.sh"
 
 N="${1:-2}"
 SESSION="ship-it"
+export ORCH_TOTAL_AGENTS=$(( N + 2 ))  # orchestrator + N coders + reviewer
 
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 

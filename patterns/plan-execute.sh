@@ -19,6 +19,7 @@ source "$ORCHESTRATION_HOME/lib/common.sh"
 
 N="${1:-1}"
 SESSION="plan-execute"
+export ORCH_TOTAL_AGENTS=$(( N + 3 ))  # orchestrator + architect + N coders + reviewer
 
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 

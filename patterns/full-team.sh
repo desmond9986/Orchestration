@@ -20,6 +20,7 @@ set -euo pipefail
 source "$ORCHESTRATION_HOME/lib/common.sh"
 
 SESSION="full-team"
+export ORCH_TOTAL_AGENTS=6
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 
 bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" orchestrator orchestrator "${ORCH_MODEL_orchestrator:-claude}"

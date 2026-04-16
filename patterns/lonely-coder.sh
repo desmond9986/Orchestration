@@ -11,6 +11,7 @@ set -euo pipefail
 source "$ORCHESTRATION_HOME/lib/common.sh"
 
 SESSION="lonely-coder"
+export ORCH_TOTAL_AGENTS=1
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 
 bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" coder-1 coder "${ORCH_MODEL_coder:-claude}" --hats spawner,qa,reviewer

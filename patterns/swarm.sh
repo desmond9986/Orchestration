@@ -11,6 +11,7 @@ source "$ORCHESTRATION_HOME/lib/common.sh"
 
 N="${1:-3}"
 SESSION="swarm"
+export ORCH_TOTAL_AGENTS=$(( N + 1 ))  # orchestrator + N coders
 
 bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$SESSION"
 bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" orchestrator orchestrator "${ORCH_MODEL_orchestrator:-claude}"
