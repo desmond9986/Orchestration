@@ -17,7 +17,29 @@ fi
 init_session() {
   local session="$1"
   local cwd="${2:-$(project_root)}"
+  local cwd_real
+  cwd_real=$(cd "$cwd" 2>/dev/null && pwd -P || echo "$cwd")
+  _path_fingerprint() {
+    local p="$1"
+    stat -f '%d:%i' "$p" 2>/dev/null || stat -c '%d:%i' "$p" 2>/dev/null || echo ""
+  }
   if tmux has-session -t "$session" 2>/dev/null; then
+    local existing_path existing_real existing_fp cwd_fp
+    existing_path=$(tmux display-message -p -t "$session:0.0" '#{pane_current_path}' 2>/dev/null || echo "")
+    existing_real=$(cd "$existing_path" 2>/dev/null && pwd -P || echo "$existing_path")
+    existing_fp=$(_path_fingerprint "$existing_real")
+    cwd_fp=$(_path_fingerprint "$cwd_real")
+    # On case-insensitive filesystems (common on macOS), the same directory can
+    # appear with different letter casing. Prefer inode/device fingerprint match.
+    local same_project=0
+    if [[ -n "$existing_fp" && -n "$cwd_fp" && "$existing_fp" == "$cwd_fp" ]]; then
+      same_project=1
+    elif [[ -n "$existing_real" && "$existing_real" == "$cwd_real" ]]; then
+      same_project=1
+    fi
+    if (( same_project == 0 )) && [[ -n "$existing_real" && "${ORCH_ALLOW_CROSS_PROJECT_SESSION_REUSE:-0}" != "1" ]]; then
+      die "tmux session '$session' already exists for another project: $existing_real (current: $cwd_real). Use a different session name or set ORCH_ALLOW_CROSS_PROJECT_SESSION_REUSE=1"
+    fi
     info "tmux session '$session' already exists, reusing"
   else
     tmux new-session -d -s "$session" -c "$cwd"
@@ -86,6 +108,9 @@ send_line() {
 set_pane_title() {
   local target="$1" title="$2"
   tmux select-pane -t "$target" -T "$title" 2>/dev/null || true
+  # Stable metadata for orchestration recovery even if the CLI later changes
+  # the visible pane title.
+  tmux set-option -p -t "$target" @orch_agent_id "$title" 2>/dev/null || true
 }
 
 # Kill a single pane.

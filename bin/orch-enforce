@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# orch-enforce — active policy loop for inbox discipline and target health.
+#
+# Usage:
+#   orch-enforce --on [--interval <sec>]
+#   orch-enforce --off
+#   orch-enforce --status
+#   orch-enforce --once
+#   orch-enforce --help
+#
+# Notes:
+# - Runs per project (uses current directory's .agents state).
+# - Default interval: 90s.
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+require_cmd jq
+require_cmd tmux
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+export ORCH_PROJECT="${ORCH_PROJECT:-$PWD}"
+[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+
+ROSTER_LIB="$ORCHESTRATION_HOME/lib/roster.sh"
+
+PID_FILE="$(agents_dir)/enforce.pid"
+LOG_FILE="$(agents_dir)/enforce.log"
+HEARTBEAT_FILE="$(agents_dir)/enforce.heartbeat"
+INTERVAL_FILE="$(agents_dir)/enforce.interval"
+
+DEFAULT_INTERVAL="${ORCH_ENFORCE_INTERVAL:-90}"
+MODE=""
+INTERVAL="$DEFAULT_INTERVAL"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --on) MODE="on"; shift ;;
+    --off) MODE="off"; shift ;;
+    --status) MODE="status"; shift ;;
+    --once) MODE="once"; shift ;;
+    --loop) MODE="loop"; shift ;;
+    --interval)
+      INTERVAL="${2:-}"
+      [[ "$INTERVAL" =~ ^[0-9]+$ ]] || die "invalid --interval '$INTERVAL' (seconds)"
+      shift 2
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (try: orch-enforce --help)" ;;
+  esac
+done
+
+[[ -n "$MODE" ]] || MODE="status"
+
+pane_exists_exact() {
+  local target="$1"
+  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+    | grep -Fxq "$target"
+}
+
+pane_agent_id() {
+  local target="$1"
+  tmux display-message -p -t "$target" '#{@orch_agent_id}' 2>/dev/null || true
+}
+
+pid_running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+cleanup_stale_pid() {
+  if [[ -f "$PID_FILE" ]] && ! pid_running; then
+    rm -f "$PID_FILE"
+  fi
+}
+
+recover_target_by_meta() {
+  local id="$1"
+  local session
+  session=$(jq -r '.session // ""' "$(roster_file)")
+  [[ -n "$session" && "$session" != "null" ]] || return 1
+  tmux has-session -t "$session" 2>/dev/null || return 1
+
+  local recovered count
+  recovered=$(tmux list-panes -t "$session" -F "#{session_name}:#{window_index}.#{pane_index}	#{@orch_agent_id}" 2>/dev/null \
+    | awk -F'\t' -v aid="$id" '$2==aid{print $1}')
+  count=$(printf "%s\n" "$recovered" | sed '/^$/d' | wc -l | tr -d ' ')
+  if (( count == 1 )); then
+    printf "%s" "$(printf "%s\n" "$recovered" | sed -n '1p')"
+    return 0
+  fi
+  return 1
+}
+
+run_cycle() {
+  local nudged=0 healed=0 unreachable=0 mismatched=0
+  local oh="$ORCHESTRATION_HOME"
+
+  while IFS= read -r row; do
+    local id target
+    id=$(jq -r '.id' <<<"$row")
+    target=$(jq -r '.target // ""' <<<"$row")
+    [[ -n "$id" && -n "$target" ]] || continue
+
+    if ! pane_exists_exact "$target"; then
+      local recovered
+      recovered=$(recover_target_by_meta "$id" || true)
+      if [[ -n "$recovered" ]]; then
+        bash "$ROSTER_LIB" retarget "$id" "$recovered" >/dev/null 2>&1 || true
+        target="$recovered"
+        healed=$((healed + 1))
+        log_line "ENFORCE_HEAL: $id -> $target"
+      else
+        unreachable=$((unreachable + 1))
+        log_line "ENFORCE_UNREACHABLE: $id target=$target"
+        continue
+      fi
+    fi
+
+    local meta
+    meta=$(pane_agent_id "$target")
+    if [[ -n "$meta" && "$meta" != "$id" ]]; then
+      mismatched=$((mismatched + 1))
+      log_line "ENFORCE_MISMATCH: $id target=$target has=$meta"
+      continue
+    fi
+
+    local inbox unread
+    inbox="$(inbox_dir)/$id.jsonl"
+    unread=0
+    [[ -f "$inbox" ]] && unread=$(wc -l < "$inbox" | tr -d ' ')
+    if (( unread > 0 )); then
+      local msg
+      msg="SYSTEM REMINDER: You have $unread unread orchestration inbox message(s). Read now with: bash $oh/lib/protocol.sh check-inbox $id . Then reply only via protocol.sh send or protocol.sh status."
+      tmux send-keys -t "$target" C-u
+      tmux send-keys -t "$target" "$msg"
+      tmux send-keys -t "$target" Enter
+      nudged=$((nudged + 1))
+    fi
+  done < <(jq -rc '.agents[] | select(.status=="active") | {id,target}' "$(roster_file)")
+
+  printf "%s\n" "cycle nudged=$nudged healed=$healed unreachable=$unreachable mismatched=$mismatched"
+  printf "%s\n" "$(date +%s)" > "$HEARTBEAT_FILE"
+}
+
+start_loop() {
+  cleanup_stale_pid
+  if pid_running; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    info "orch-enforce already running (pid=$pid)"
+    return 0
+  fi
+
+  printf "%s\n" "$INTERVAL" > "$INTERVAL_FILE"
+  : > "$LOG_FILE"
+  nohup env \
+    ORCHESTRATION_HOME="$ORCHESTRATION_HOME" \
+    ORCH_PROJECT="$ORCH_PROJECT" \
+    bash "$0" --loop --interval "$INTERVAL" >>"$LOG_FILE" 2>&1 &
+  local pid=$!
+  printf "%s\n" "$pid" > "$PID_FILE"
+  ok "orch-enforce started (pid=$pid, interval=${INTERVAL}s)"
+}
+
+stop_loop() {
+  cleanup_stale_pid
+  if ! pid_running; then
+    info "orch-enforce is already off"
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  local pid
+  pid=$(cat "$PID_FILE")
+  kill "$pid" 2>/dev/null || true
+  sleep 0.1
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  ok "orch-enforce stopped"
+}
+
+show_status() {
+  cleanup_stale_pid
+  local interval hb age
+  interval="$DEFAULT_INTERVAL"
+  [[ -f "$INTERVAL_FILE" ]] && interval=$(cat "$INTERVAL_FILE" 2>/dev/null || echo "$DEFAULT_INTERVAL")
+  hb=0
+  [[ -f "$HEARTBEAT_FILE" ]] && hb=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo 0)
+  age="-"
+  if [[ "$hb" =~ ^[0-9]+$ ]] && (( hb > 0 )); then
+    age="$(( $(date +%s) - hb ))s"
+  fi
+
+  if pid_running; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    printf "%s\n" "orch-enforce: ON (pid=$pid interval=${interval}s heartbeat_age=$age)"
+    exit 0
+  fi
+  printf "%s\n" "orch-enforce: OFF (interval=${interval}s last_heartbeat_age=$age)"
+  exit 1
+}
+
+loop_forever() {
+  trap 'rm -f "$PID_FILE"' EXIT INT TERM
+  while true; do
+    run_cycle
+    sleep "$INTERVAL"
+  done
+}
+
+case "$MODE" in
+  on) start_loop ;;
+  off) stop_loop ;;
+  status) show_status ;;
+  once) run_cycle ;;
+  loop) loop_forever ;;
+  *) die "invalid mode: $MODE" ;;
+esac

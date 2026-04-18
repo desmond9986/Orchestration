@@ -42,6 +42,55 @@ orchestrate lean                    # 1 orchestrator (with architect hat) + 2 co
 Tmux will attach automatically. One pane per agent. Each agent sees its
 role, the communication protocol, project context, and their identity.
 
+## Future improvements (usability roadmap)
+
+Current pain point: operating everything via many separate commands is hard to
+remember and easy to misuse.
+
+Planned improvements:
+
+- **Unified control UI (`orch ui`)**  
+  One entrypoint to launch, monitor, message, add/remove agents, and end a
+  session from a single interactive screen.
+
+- **Command palette + guided flows**  
+  Fuzzy-search actions (spawn, send task, reassign, retarget, unblock) with
+  prompts, defaults, and validation to reduce command memorization.
+
+- **Roster and pane map editor**  
+  Visual agent ↔ pane mapping with one-click retarget/reset after tmux layout
+  changes.
+
+- **Task board view**  
+  Kanban-style task states (`pending/claimed/blocked/done`) with dependency
+  indicators and quick claim/unblock controls.
+
+- **Live health dashboard**  
+  Per-agent status, last message age, delivery failures (`NOTIFY_FAIL`,
+  `ACK_TIMEOUT`), and suggested remediation actions.
+
+- **Safe mode + one-shot dangerous actions**  
+  Clear toggles for permission bypass (`--yolo` / `--dangerously-skip-permissions`)
+  scoped per spawn, with visible current state.
+
+- **Session presets**  
+  Save/load team templates, role-model defaults, and delivery settings so users
+  can start known workflows without re-entering flags/env vars.
+
+- **Automatic per-coder worktrees (when coder count > 1)**  
+  Spawn each coder in an isolated git worktree by default for multi-coder
+  sessions to reduce file conflicts and cross-agent interference. Keep current
+  single-worktree behavior for solo-coder sessions.
+
+- **Better onboarding**  
+  Expand `orch-doctor` with deeper remediation playbooks, add `orch tutorial`,
+  and context-aware help text that suggests the next command based on session
+  state.
+
+- **Desktop/web control plane (optional)**  
+  After TUI stabilizes, expose the same control surface in a lightweight local
+  GUI for users who prefer point-and-click operations.
+
 ## Patterns
 
 ```bash
@@ -339,6 +388,11 @@ orch-status --status                # summary status board
 orch-status --roster                # just the roster
 orch-status --inbox <id>            # peek an agent's unread inbox
 orch-status --log                   # delivery errors / retries
+orch-doctor                         # health check (HEALTHY/DEGRADED/BROKEN)
+orch-doctor --json                  # machine-readable health report
+orch-enforce --on                   # start active inbox/target enforcement loop
+orch-enforce --status               # check enforce loop state
+orch-enforce --off                  # stop enforcement loop
 
 orch-watch                          # live dashboard (refresh every 2s)
 orch-watch 3 10                     # refresh every 3s, show 10 lines per pane
@@ -348,6 +402,31 @@ orch-watch 3 10                     # refresh every 3s, show 10 lines per pane
 1. The orchestration tmux session itself
 2. `orch-watch` to see if anyone is stuck
 3. `orch-status --follow` to follow the message stream
+
+Health checks:
+
+```bash
+orch-doctor
+# Exit 0  = HEALTHY
+# Exit 10 = DEGRADED (warnings)
+# Exit 20 = BROKEN   (requires intervention)
+```
+
+`orch-doctor` validates roster integrity, tmux reachability, pane metadata
+(`@orch_agent_id`), messaging failure signals (`NOTIFY_FAIL`, `ACK_TIMEOUT`,
+`RETARGET_FAIL`), and lightweight status-vs-git evidence drift checks.
+
+Fast enforcement loop (optional):
+
+```bash
+orch-enforce --on --interval 60
+orch-enforce --status
+orch-enforce --off
+```
+
+`orch-enforce` scans active agents on a timer, attempts metadata-based
+retarget healing, and nudges panes with unread inbox backlog so agents are
+repeatedly forced back to protocol commands.
 
 ## Shared task list
 
@@ -377,7 +456,7 @@ Claim conflicts are safe (mkdir-based mutex). Workers can self-serve from
 ## Delivery modes
 
 By default, `protocol.sh send` writes to the target's JSONL inbox and prints
-`# CHECK INBOX (<id>)` in their pane — the agent polls. Set `ORCH_DELIVERY=push`
+`check inbox(<id>) from:<sender>` in their pane — the agent polls. Set `ORCH_DELIVERY=push`
 to paste the full message directly into the target pane (no polling needed):
 
 ```bash
@@ -522,7 +601,7 @@ Two different readers, two different formats:
 - **Payload** stays a plain string — agents write prose, not structured data.
 
 ### Two delivery modes (`notify` / `push`), selectable per session
-- `notify` (default): write inbox, print `# CHECK INBOX`. Agent polls when
+- `notify` (default): write inbox, send `check inbox(<id>) from:<sender>` hint. Agent polls when
   convenient → quieter, lets the agent batch.
 - `push`: write inbox **and** paste the full message into the target pane
   via `tmux load-buffer`/`paste-buffer -d`. No polling → more responsive.
@@ -734,7 +813,7 @@ everything else — broadcasts add noise to every agent's inbox.
 
 | Mode | What happens | Best for |
 |---|---|---|
-| `notify` (default) | inbox write + `# CHECK INBOX` printed in target pane | Long-running agents that batch their reads |
+| `notify` (default) | inbox write + `check inbox(<id>) from:<sender>` hint sent to pane | Long-running agents that batch their reads |
 | `push` | inbox write + full message pasted directly into target pane | Real-time sessions where you want instant visibility |
 | `silent` | inbox write only, no tmux interaction | Scripts/automation, or when pane delivery is broken |
 

@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# orch-doctor — health checks for the orchestration control plane.
+#
+# Usage:
+#   orch-doctor
+#   orch-doctor --json
+#   orch-doctor --help
+#
+# Exit codes:
+#   0  HEALTHY
+#   10 DEGRADED
+#   20 BROKEN
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+JSON=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --json) JSON=1; shift ;;
+    *) die "unknown option: $1 (try: orch-doctor --help)" ;;
+  esac
+done
+
+export ORCH_PROJECT="$PWD"
+[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+require_cmd jq
+require_cmd tmux
+
+STALE_SEC="${ORCH_DOCTOR_STALE_SEC:-900}"
+EVIDENCE_SEC="${ORCH_DOCTOR_EVIDENCE_SEC:-1200}"
+NOW_EPOCH=$(date +%s)
+
+overall="HEALTHY"
+ISSUE_JSONL="$(mktemp)"
+trap 'rm -f "$ISSUE_JSONL"' EXIT
+
+sev_rank() {
+  case "$1" in
+    HEALTHY) echo 0 ;;
+    DEGRADED) echo 1 ;;
+    BROKEN) echo 2 ;;
+    *) echo 0 ;;
+  esac
+}
+
+set_overall() {
+  local sev="$1"
+  if (( $(sev_rank "$sev") > $(sev_rank "$overall") )); then
+    overall="$sev"
+  fi
+}
+
+add_issue() {
+  local sev="$1" scope="$2" msg="$3" fix="$4"
+  set_overall "$sev"
+  jq -cn --arg sev "$sev" --arg scope "$scope" --arg msg "$msg" --arg fix "$fix" \
+    '{severity:$sev, scope:$scope, message:$msg, fix:$fix}' >> "$ISSUE_JSONL"
+}
+
+mtime_epoch() {
+  local p="$1"
+  stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0
+}
+
+pane_exists() {
+  local target="$1"
+  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+    | grep -Fxq "$target"
+}
+
+pane_agent_id() {
+  local target="$1"
+  tmux display-message -p -t "$target" '#{@orch_agent_id}' 2>/dev/null || true
+}
+
+inbox_path() { echo "$(inbox_dir)/$1.jsonl"; }
+archive_path() { echo "$(inbox_dir)/$1.archive.jsonl"; }
+
+check_required_paths() {
+  [[ -d "$(agents_dir)" ]] || add_issue BROKEN global ".agents directory missing" "run orchestrate <pattern> in the project root"
+  [[ -f "$(roster_file)" ]] || add_issue BROKEN global "roster.json missing" "recreate session: orchestrate <pattern>"
+  [[ -f "$(status_file)" ]] || add_issue DEGRADED global "status.md missing" "touch .agents/status.md or run a protocol status update"
+  [[ -f "$(bus_file)" ]] || add_issue DEGRADED global "bus.md missing" "touch .agents/bus.md or send a protocol message"
+  [[ -f "$(log_file)" ]] || add_issue DEGRADED global "log.md missing" "touch .agents/log.md"
+  [[ -d "$(inbox_dir)" ]] || add_issue BROKEN global "inbox directory missing" "mkdir -p .agents/inbox"
+}
+
+check_roster_integrity() {
+  local dup
+  dup=$(jq -r '.agents[].id' "$(roster_file)" | sort | uniq -d | tr '\n' ',' | sed 's/,$//')
+  if [[ -n "$dup" ]]; then
+    add_issue BROKEN roster "duplicate agent id(s): $dup" "remove duplicates from .agents/roster.json"
+  fi
+
+  local active_count
+  active_count=$(jq '[.agents[] | select(.status=="active")] | length' "$(roster_file)")
+  if (( active_count == 0 )); then
+    add_issue DEGRADED roster "no active agents in roster" "spawn an agent: add-agent <role> <model>"
+  fi
+}
+
+check_runtime() {
+  while IFS= read -r row; do
+    local id target role
+    id=$(jq -r '.id' <<<"$row")
+    target=$(jq -r '.target // ""' <<<"$row")
+    role=$(jq -r '.role' <<<"$row")
+
+    if [[ ! "$id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      add_issue BROKEN "agent:$id" "invalid id format in roster for role=$role" "rename id to [A-Za-z0-9_-] and respawn if needed"
+    fi
+    if [[ -z "$target" ]]; then
+      add_issue BROKEN "agent:$id" "missing tmux target in roster" "retarget with: bash \$ORCHESTRATION_HOME/lib/roster.sh retarget $id <session:win.pane>"
+      continue
+    fi
+
+    if ! pane_exists "$target"; then
+      add_issue BROKEN "agent:$id" "tmux target unreachable: $target" "retarget agent to a live pane or respawn: remove-agent $id && add-agent $role <model> --id $id"
+      continue
+    fi
+
+    local pane_id
+    pane_id=$(pane_agent_id "$target")
+    if [[ -z "$pane_id" ]]; then
+      add_issue DEGRADED "agent:$id" "pane metadata missing (@orch_agent_id) at $target" "set metadata: tmux set-option -p -t $target @orch_agent_id $id"
+    elif [[ "$pane_id" != "$id" ]]; then
+      add_issue BROKEN "agent:$id" "pane metadata mismatch: target=$target has @orch_agent_id=$pane_id" "retarget/repair mapping: bash \$ORCHESTRATION_HOME/lib/roster.sh retarget $id <correct target>"
+    fi
+
+    local latest=0
+    local inbox archive
+    inbox="$(inbox_path "$id")"
+    archive="$(archive_path "$id")"
+    [[ -f "$inbox" ]] && latest=$(mtime_epoch "$inbox")
+    if [[ -f "$archive" ]]; then
+      local a
+      a=$(mtime_epoch "$archive")
+      (( a > latest )) && latest="$a"
+    fi
+    if (( latest > 0 )); then
+      local age
+      age=$((NOW_EPOCH - latest))
+      if (( age > STALE_SEC )); then
+        add_issue DEGRADED "agent:$id" "inbox/archive activity stale (${age}s > ${STALE_SEC}s)" "nudge agent to run: bash \$ORCHESTRATION_HOME/lib/protocol.sh check-inbox $id"
+      fi
+    fi
+  done < <(jq -rc '.agents[] | select(.status=="active") | {id,target,role}' "$(roster_file)")
+}
+
+check_message_health() {
+  [[ -f "$(log_file)" ]] || return 0
+  local nf af rf
+  nf=$(grep -c "NOTIFY_FAIL:" "$(log_file)" 2>/dev/null || true)
+  af=$(grep -c "ACK_TIMEOUT:" "$(log_file)" 2>/dev/null || true)
+  rf=$(grep -c "RETARGET_FAIL:" "$(log_file)" 2>/dev/null || true)
+  nf=$(printf "%s" "${nf:-0}" | tail -n1 | tr -cd '0-9')
+  af=$(printf "%s" "${af:-0}" | tail -n1 | tr -cd '0-9')
+  rf=$(printf "%s" "${rf:-0}" | tail -n1 | tr -cd '0-9')
+  [[ -n "$nf" ]] || nf=0
+  [[ -n "$af" ]] || af=0
+  [[ -n "$rf" ]] || rf=0
+  if (( nf > 0 )); then
+    add_issue DEGRADED messaging "notify failures detected: $nf" "check roster targets and pane metadata; run orch-doctor again"
+  fi
+  if (( af > 0 )); then
+    add_issue DEGRADED messaging "ack timeouts detected: $af" "increase ORCH_RECEIVER_ACK_TIMEOUT_MS or verify receivers call check-inbox"
+  fi
+  if (( rf > 0 )); then
+    add_issue DEGRADED messaging "retarget failures detected: $rf" "retarget agents to live panes and ensure @orch_agent_id is set"
+  fi
+}
+
+check_evidence() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+  local recent_done
+  recent_done=$(tail -n 400 "$(status_file)" 2>/dev/null | grep -Ec ' DONE(\b| )' || true)
+  (( recent_done > 0 )) || return 0
+
+  local recent_commits
+  recent_commits=$(git log --since="${EVIDENCE_SEC} seconds ago" --oneline 2>/dev/null | wc -l | tr -d ' ')
+  if (( recent_commits == 0 )); then
+    local dirty=0
+    git diff --quiet >/dev/null 2>&1 || dirty=1
+    git diff --cached --quiet >/dev/null 2>&1 || dirty=1
+    if (( dirty == 0 )); then
+      add_issue DEGRADED evidence "DONE/status activity exists but no recent git commit or diff evidence" "require proof in DONE payload (commit hash/files/tests) and verify in review"
+    fi
+  fi
+}
+
+check_required_paths
+check_roster_integrity
+check_runtime
+check_message_health
+check_evidence
+
+issue_count=$(wc -l < "$ISSUE_JSONL" | tr -d ' ')
+
+if (( JSON == 1 )); then
+  jq -n \
+    --arg overall "$overall" \
+    --arg stale_sec "$STALE_SEC" \
+    --arg evidence_sec "$EVIDENCE_SEC" \
+    --argjson issues "$(jq -s '.' "$ISSUE_JSONL")" \
+    '{overall:$overall, thresholds:{stale_sec:($stale_sec|tonumber), evidence_sec:($evidence_sec|tonumber)}, issues:$issues}'
+else
+  printf "%s\n" "Overall: $overall"
+  printf "\n"
+  if (( issue_count == 0 )); then
+    printf "%s\n" "No issues detected."
+  else
+    printf "%s\n" "Issues ($issue_count):"
+    nl -w1 -s'. ' "$ISSUE_JSONL" | while IFS= read -r line; do
+      payload=""
+      sev=""
+      scope=""
+      msg=""
+      payload="${line#*. }"
+      sev=$(jq -r '.severity' <<<"$payload")
+      scope=$(jq -r '.scope' <<<"$payload")
+      msg=$(jq -r '.message' <<<"$payload")
+      printf "%s\n" "[$sev] $scope: $msg"
+    done
+    printf "\n"
+    printf "%s\n" "Suggested fixes:"
+    jq -r '.fix' "$ISSUE_JSONL" | awk '!seen[$0]++' | nl -w1 -s'. '
+  fi
+fi
+
+case "$overall" in
+  HEALTHY) exit 0 ;;
+  DEGRADED) exit 10 ;;
+  BROKEN) exit 20 ;;
+  *) exit 1 ;;
+esac

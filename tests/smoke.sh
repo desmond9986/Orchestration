@@ -124,6 +124,8 @@ test_protocol() {
 # - sender hint is printed
 # - notify does not auto-run check-inbox
 # - metacharacter ids do not get executed as shell fragments
+# - stale roster target is auto-recovered by pane title
+# - generated message ids are unique under burst sends
 test_protocol_notify_tmux() {
   printf "\n\033[1mprotocol notify (tmux)\033[0m\n"
   if ! command -v tmux >/dev/null 2>&1; then
@@ -158,6 +160,8 @@ test_protocol_notify_tmux() {
   local rcvr_target="$sess:0.1"
   bash "$ORCHESTRATION_HOME/lib/roster.sh" add sender coder claude "$sender_target" >/dev/null
   bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$to_id" coder claude "$rcvr_target" >/dev/null
+  tmux set-option -p -t "$sender_target" @orch_agent_id sender >/dev/null 2>&1 || true
+  tmux set-option -p -t "$rcvr_target" @orch_agent_id "$to_id" >/dev/null 2>&1 || true
 
   # Notify must not execute whatever text is currently typed in the receiver pane.
   tmux send-keys -t "$rcvr_target" "touch prehint_should_not_run"
@@ -190,32 +194,62 @@ test_protocol_notify_tmux() {
   assert_eq "1" "$inbox_lines" "notify keeps message unread by default"
   assert_eq "0" "$arch_lines" "notify does not archive without check-inbox"
 
-  local pane sender_pane
-  pane=$(tmux capture-pane -p -t "$rcvr_target" 2>/dev/null)
+  # Wait for the hint text to appear in the pane (lock + sleeps add latency).
+  local pane="" sender_pane=""
+  tries=0
+  while (( tries < max_tries )); do
+    pane=$(tmux capture-pane -p -t "$rcvr_target" 2>/dev/null)
+    [[ "$pane" == *"check-inbox"* ]] && break
+    sleep 0.1
+    tries=$((tries + 1))
+  done
   sender_pane=$(tmux capture-pane -p -t "$sender_target" 2>/dev/null)
-  assert_contains "$pane" "# CHECK INBOX" "notify prints check-inbox hint in receiver pane"
+  assert_contains "$pane" "check-inbox" "notify prints check-inbox hint in receiver pane"
   assert_contains "$pane" "from:sender" "notify hint includes sender id"
-  if [[ "$sender_pane" == *"# CHECK INBOX"* ]]; then
+  if [[ "$sender_pane" == *"check-inbox"* ]]; then
     fail "notify must target receiver pane, not sender pane"
   else
     pass "notify targets receiver pane only"
   fi
 
-  # Metacharacter id must not execute shell fragments in the receiver pane.
+  # Metacharacter ids are rejected by whitelist validation.
   local evil_id='evil; touch pwned_marker'
-  bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$evil_id" coder claude "$rcvr_target" >/dev/null
-  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$evil_id" INFO "m2" --from sender >/dev/null 2>&1 || true
-  tries=0
-  while (( tries < max_tries )); do
-    [[ -f "$ORCH_PROJECT/pwned_marker" ]] && break
-    sleep 0.1
-    tries=$((tries + 1))
-  done
-  if [[ -f "$ORCH_PROJECT/pwned_marker" ]]; then
-    fail "notify hint must not execute metacharacters in agent id"
+  assert_fails "reject metacharacter agent id" \
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$evil_id" coder claude "$rcvr_target"
+
+  # Sender labels are normalized, so shell expansion cannot execute in pane.
+  bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$to_id" INFO "m-from" --from '$(touch pwned_by_from)' >/dev/null 2>&1 || true
+  if [[ -f "$ORCH_PROJECT/pwned_by_from" ]]; then
+    fail "notify from label must not execute shell expansion"
   else
-    pass "notify hint safely escapes metacharacter ids"
+    pass "notify from label is shell-safe"
   fi
+
+  # Auto-retarget: stale pane target should recover by pane title and deliver.
+  local heal_id="heal"
+  tmux select-pane -t "$rcvr_target" -T "$heal_id"
+  tmux set-option -p -t "$rcvr_target" @orch_agent_id "$heal_id" >/dev/null 2>&1 || true
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$heal_id" coder claude "$sess:0.99" >/dev/null
+  ORCH_ALLOW_TITLE_RETARGET=1 bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$heal_id" INFO "m3" --from sender >/dev/null 2>&1 || true
+  local healed_target
+  healed_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target "$heal_id")
+  assert_eq "$rcvr_target" "$healed_target" "stale target auto-retargets by pane title"
+  assert_contains "$(tail -n 20 "$ORCH_PROJECT/.agents/log.md")" "RETARGET_" \
+    "retarget event logged"
+
+  # Burst send: ids should remain unique.
+  local burst_id="burst"
+  tmux select-pane -t "$sender_target" -T "$burst_id"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add "$burst_id" coder claude "$sender_target" >/dev/null
+  local n=80 i
+  for (( i=1; i<=n; i++ )); do
+    bash "$ORCHESTRATION_HOME/lib/protocol.sh" send "$burst_id" INFO "b-$i" --from sender >/dev/null 2>&1 || true
+  done
+  local uniq_count total_count burst_inbox
+  burst_inbox="$ORCH_PROJECT/.agents/inbox/$burst_id.jsonl"
+  uniq_count=$(jq -r '.id' "$burst_inbox" | sort | uniq | wc -l | tr -d ' ')
+  total_count=$(jq -r '.id' "$burst_inbox" | wc -l | tr -d ' ')
+  assert_eq "$total_count" "$uniq_count" "burst send generates unique message ids"
 
   rm -rf "$ORCH_PROJECT"
   trap - RETURN
@@ -394,12 +428,12 @@ test_spawn_layout() {
   }
 
   local sess="layout-$$"
-  tmux new-session -d -s "$sess" -x 220 -y 50
 
   # ── split layout (>4 agents): each agent must get a unique pane ──────
   # Don't use fresh_project — it inits a 'smoke' session which would collide.
   ORCH_PROJECT=$(mktemp -d)
   export ORCH_PROJECT
+  tmux new-session -d -s "$sess" -c "$ORCH_PROJECT" -x 220 -y 50
   bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$sess" >/dev/null
 
   export ORCH_TOTAL_AGENTS=6
@@ -437,6 +471,29 @@ test_spawn_layout() {
     echo "$skip"
   ' >/dev/null || rc=$?
   assert_eq "0" "$rc" "skip-permissions: unset per-role var does not crash under set -u"
+
+  # Cross-project safety: reusing the same tmux session name across different
+  # project roots must fail fast (prevents messages leaking between projects).
+  local proj_a proj_b rc2=0
+  proj_a=$(mktemp -d)
+  proj_b=$(mktemp -d)
+  export ORCH_PROJECT="$proj_a"
+  tmux new-session -d -s collide -c "$proj_a"
+  bash -c '
+    set -euo pipefail
+    export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
+    export ORCH_PROJECT="'"$proj_b"'"
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    init_session collide >/dev/null
+  ' >/dev/null 2>&1 || rc2=$?
+  if (( rc2 != 0 )); then
+    pass "cross-project session name collision is rejected"
+  else
+    fail "cross-project session name collision must be rejected"
+  fi
+  tmux kill-session -t collide 2>/dev/null || true
+  rm -rf "$proj_a" "$proj_b"
 
   cleanup_layout
 }
@@ -579,6 +636,100 @@ test_model_select() {
   assert_eq "unset" "$out" "pattern without AskModels: no exports"
 }
 
+# ── orch-doctor ──────────────────────────────────────────────────────────
+test_doctor() {
+  printf "\n\033[1morch-doctor\033[0m\n"
+  fresh_project; local dir="$ORCH_PROJECT"
+
+  # No active agents is degraded (not broken).
+  local out rc
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" 2>&1) || rc=$?
+  assert_eq "10" "$rc" "doctor exits 10 for degraded sessions"
+  assert_contains "$out" "Overall: DEGRADED" "doctor prints DEGRADED overall"
+
+  # JSON mode should mirror overall status.
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" --json 2>/dev/null) || rc=$?
+  assert_eq "10" "$rc" "doctor --json preserves degraded exit code"
+  assert_eq "DEGRADED" "$(jq -r '.overall' <<<"$out")" "doctor --json exposes overall"
+
+  # Active agent with unreachable pane should be broken.
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add broken coder codex "no-such-session-$$:99.99" >/dev/null
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" 2>&1) || rc=$?
+  assert_eq "20" "$rc" "doctor exits 20 for broken sessions"
+  assert_contains "$out" "tmux target unreachable" "doctor reports unreachable tmux target"
+
+  rm -rf "$dir"
+}
+
+# ── orch-enforce ─────────────────────────────────────────────────────────
+test_enforce() {
+  printf "\n\033[1morch-enforce\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-enforce-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_enforce_tmux() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+  trap cleanup_enforce_tmux RETURN
+
+  local dir sess
+  dir=$(mktemp -d)
+  sess="enf-$$"
+  export ORCH_PROJECT="$dir"
+  tmux new-session -d -s "$sess" -c "$dir" -x 120 -y 30
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$sess" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder codex "$sess:0.0" >/dev/null
+  tmux set-option -p -t "$sess:0.0" @orch_agent_id coder-1 >/dev/null 2>&1 || true
+
+  mkdir -p "$dir/.agents/inbox"
+  printf '{"id":"m1","ts":"%s","from":"orchestrator","to":"coder-1","type":"TASK","payload":"x","read":false}\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    > "$dir/.agents/inbox/coder-1.jsonl"
+
+  local out rc
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --once 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-enforce --once exits cleanly"
+  assert_contains "$out" "nudged=1" "orch-enforce nudges agents with unread inbox"
+
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --on --interval 1 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-enforce --on starts loop"
+  assert_contains "$out" "started" "orch-enforce reports started"
+
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --status 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-enforce --status is zero when running"
+  assert_contains "$out" "ON" "orch-enforce status shows ON"
+
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --off 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-enforce --off stops loop"
+
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --status 2>&1) || rc=$?
+  assert_eq "1" "$rc" "orch-enforce --status is non-zero when off"
+  assert_contains "$out" "OFF" "orch-enforce status shows OFF"
+
+  rm -rf "$dir"
+  trap - RETURN
+  cleanup_enforce_tmux
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
@@ -589,9 +740,11 @@ case "$SUITE" in
   concurrency)  test_concurrency ;;
   end-session)  test_end_session ;;
   model-select) test_model_select ;;
+  doctor)       test_doctor ;;
+  enforce)      test_enforce ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_doctor; test_enforce; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

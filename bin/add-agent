@@ -48,6 +48,9 @@ if [[ -z "$ID" ]]; then
 fi
 
 export ORCH_PROJECT="$PWD"
+# In a live session, never reuse a pre-existing empty pane for add-agent.
+# This avoids hijacking the pane the human is currently typing in.
+export ORCH_NEVER_REUSE_EMPTY_PANE=1
 
 ARGS=("$ID" "$ROLE" "$MODEL")
 [[ -n "$HATS" ]]   && ARGS+=("--hats" "$HATS")

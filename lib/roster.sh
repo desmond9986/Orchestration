@@ -5,6 +5,7 @@
 #   roster.sh init <session_name>
 #   roster.sh add <id> <role> <model> <target> [--hats h1,h2] [--parent <id>]
 #   roster.sh remove <id>
+#   roster.sh retarget <id> <target>   # update tmux target for active agent
 #   roster.sh list           # all agents (active + left)
 #   roster.sh list-active    # only active
 #   roster.sh find-role <role>      # IDs of active agents with this role
@@ -31,14 +32,20 @@ cmd_init() {
 }
 
 roster_lock() { echo "$(agents_dir)/roster.lock.d"; }
+valid_agent_id() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 
 _do_add() {
   local id="$1" role="$2" model="$3" target="$4"; shift 4
   local hats="[]" parent="null"
+  valid_agent_id "$id" || die "invalid agent id '$id' (allowed: [A-Za-z0-9_-])"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hats) hats=$(echo "$2" | jq -R 'split(",")'); shift 2 ;;
-      --parent) parent=$(jq -n --arg p "$2" '$p'); shift 2 ;;
+      --parent)
+        valid_agent_id "$2" || die "invalid parent id '$2' (allowed: [A-Za-z0-9_-])"
+        parent=$(jq -n --arg p "$2" '$p')
+        shift 2
+        ;;
       *) die "unknown flag: $1" ;;
     esac
   done
@@ -75,10 +82,26 @@ _do_remove() {
   ok "removed: $id"
 }
 
+_do_retarget() {
+  local id="$1" target="$2"
+  [[ -f "$(roster_file)" ]] || die "no roster"
+  local found
+  found=$(jq -r --arg id "$id" \
+    '.agents[] | select(.id==$id and .status=="active") | .id' "$(roster_file)")
+  [[ -n "$found" ]] || die "no active agent to retarget: $id"
+  local tmp; tmp=$(mktemp)
+  jq --arg id "$id" --arg target "$target" --arg t "$(ts)" \
+    '(.agents[] | select(.id==$id and .status=="active") | .target) = $target |
+     (.agents[] | select(.id==$id and .status=="active") | .retargeted) = $t' \
+    "$(roster_file)" > "$tmp" && mv "$tmp" "$(roster_file)"
+  ok "retargeted: $id -> $target"
+}
+
 # Mutations are serialized through the roster lock — concurrent add/remove
 # used to race through read-modify-write and drop entries.
 cmd_add()    { with_file_lock "$(roster_lock)" _do_add "$@"; }
 cmd_remove() { with_file_lock "$(roster_lock)" _do_remove "$@"; }
+cmd_retarget(){ with_file_lock "$(roster_lock)" _do_retarget "$@"; }
 
 cmd_list() {
   jq -r '.agents[] | "\(.id)\t\(.role)\t\(.model)\t\(.target)\t\(.status)"' \
@@ -143,6 +166,7 @@ case "$CMD" in
   init)        cmd_init "$@" ;;
   add)         cmd_add "$@" ;;
   remove)      cmd_remove "$@" ;;
+  retarget)    cmd_retarget "$@" ;;
   list)        cmd_list ;;
   list-active) cmd_list_active ;;
   find-role)   cmd_find_role "$@" ;;

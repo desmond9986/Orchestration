@@ -14,6 +14,7 @@ ROSTER_LIB="$(dirname "${BASH_SOURCE[0]}")/roster.sh"
 ID="${1:?id required}"; shift
 ROLE="${1:?role required}"; shift
 MODEL="${1:?model required}"; shift
+[[ "$ID" =~ ^[A-Za-z0-9_-]+$ ]] || die "invalid agent id '$ID' (allowed: [A-Za-z0-9_-])"
 
 HATS=""
 PARENT=""
@@ -27,6 +28,9 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown flag: $1" ;;
   esac
 done
+if [[ -n "$PARENT" && ! "$PARENT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  die "invalid parent id '$PARENT' (allowed: [A-Za-z0-9_-])"
+fi
 
 # Resolve session from roster if not given
 if [[ -z "$SESSION" ]]; then
@@ -118,56 +122,71 @@ init_session "$SESSION" >/dev/null
 # If ORCH_TOTAL_AGENTS is unset (e.g. freeform), default to split layout.
 total="${ORCH_TOTAL_AGENTS:-999}"
 WIN=0
+TARGET=""
+CREATED_NEW_PANE=0
 
-if (( total <= 4 )); then
-  active_count=$(jq '[.agents[] | select(.status=="active")] | length' "$(roster_file)")
-  if (( active_count == 0 )); then
-    TARGET="$SESSION:0.0"
-  else
-    TARGET=$(new_pane "$SESSION" 0)
+_allocate_target_and_register() {
+  if bash "$ROSTER_LIB" exists "$ID" >/dev/null 2>&1; then
+    die "agent already exists: $ID"
   fi
-else
-  if [[ "$ROLE" == "orchestrator" ]]; then
-    TARGET="$SESSION:0.0"
-  else
-    ensure_window "$SESSION" 1
-    pane_count_1=$(tmux list-panes -t "$SESSION:1" 2>/dev/null | wc -l | tr -d ' ')
-    if (( pane_count_1 < 4 )); then
-      WIN=1
+  if (( total <= 4 )); then
+    active_count=$(jq '[.agents[] | select(.status=="active")] | length' "$(roster_file)")
+    if (( active_count == 0 )); then
+      TARGET="$SESSION:0.0"
     else
-      ensure_window "$SESSION" 2
-      WIN=2
+      TARGET=$(new_pane "$SESSION" 0)
+      CREATED_NEW_PANE=1
     fi
-    # Use the roster to determine occupancy, not pane count. tmux pane count
-    # stays at 1 even after the first agent reuses pane 0 — checking it would
-    # assign every subsequent agent to the same pane.
-    agents_in_win=$(jq --arg pat "$SESSION:$WIN\\." \
-      '[.agents[] | select(.status=="active") | select(.target != null) | select(.target | test($pat))] | length' \
-      "$(roster_file)")
-    if (( agents_in_win == 0 )); then
-      TARGET="$SESSION:$WIN.0"
+  else
+    if [[ "$ROLE" == "orchestrator" ]]; then
+      TARGET="$SESSION:0.0"
     else
-      TARGET=$(new_pane "$SESSION" "$WIN")
+      ensure_window "$SESSION" 1
+      pane_count_1=$(tmux list-panes -t "$SESSION:1" 2>/dev/null | wc -l | tr -d ' ')
+      if (( pane_count_1 < 4 )); then
+        WIN=1
+      else
+        ensure_window "$SESSION" 2
+        WIN=2
+      fi
+      # Use roster occupancy, not pane count.
+      agents_in_win=$(jq --arg pat "$SESSION:$WIN\\." \
+        '[.agents[] | select(.status=="active") | select(.target != null) | select(.target | test($pat))] | length' \
+        "$(roster_file)")
+      if (( agents_in_win == 0 )); then
+        if [[ "${ORCH_NEVER_REUSE_EMPTY_PANE:-0}" == "1" ]]; then
+          TARGET=$(new_pane "$SESSION" "$WIN")
+          CREATED_NEW_PANE=1
+        else
+          TARGET="$SESSION:$WIN.0"
+        fi
+      else
+        TARGET=$(new_pane "$SESSION" "$WIN")
+        CREATED_NEW_PANE=1
+      fi
     fi
   fi
-fi
 
-set_pane_title "$TARGET" "$ID"
+  set_pane_title "$TARGET" "$ID"
+  if (( total <= 4 )); then
+    tmux rename-window -t "$SESSION:0" "agents" 2>/dev/null || true
+  elif [[ "$ROLE" == "orchestrator" ]]; then
+    tmux rename-window -t "$SESSION:0" "orchestrator" 2>/dev/null || true
+  else
+    tmux rename-window -t "$SESSION:$WIN" "agents" 2>/dev/null || true
+  fi
 
-# Name the tmux window tab for easy navigation.
-if (( total <= 4 )); then
-  tmux rename-window -t "$SESSION:0" "agents" 2>/dev/null || true
-elif [[ "$ROLE" == "orchestrator" ]]; then
-  tmux rename-window -t "$SESSION:0" "orchestrator" 2>/dev/null || true
-else
-  tmux rename-window -t "$SESSION:$WIN" "agents" 2>/dev/null || true
-fi
-
-# Register in roster
-ADD_ARGS=("$ID" "$ROLE" "$MODEL" "$TARGET")
-[[ -n "$HATS" ]]   && ADD_ARGS+=("--hats" "$HATS")
-[[ -n "$PARENT" ]] && ADD_ARGS+=("--parent" "$PARENT")
-bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null
+  ADD_ARGS=("$ID" "$ROLE" "$MODEL" "$TARGET")
+  [[ -n "$HATS" ]]   && ADD_ARGS+=("--hats" "$HATS")
+  [[ -n "$PARENT" ]] && ADD_ARGS+=("--parent" "$PARENT")
+  if ! bash "$ROSTER_LIB" add "${ADD_ARGS[@]}" >/dev/null; then
+    if [[ "$CREATED_NEW_PANE" == "1" ]]; then
+      kill_pane "$TARGET"
+    fi
+    die "failed to register spawned agent '$ID'"
+  fi
+}
+with_file_lock "$(agents_dir)/spawn.lock.d" _allocate_target_and_register
 
 # Build the CLI launch command.
 # For claude: role is loaded via --append-system-prompt-file (reliable, no
@@ -224,13 +243,31 @@ case "$MODEL" in
     # wait_for_cli_ready can return on a transient stable state (blank screen
     # between trust dismissal and the actual chat UI appearing). Checking for
     # ❯ ensures we don't send the kick-off too early.
-    wait_for_input_prompt "$TARGET" || warn "input prompt not visible for $ID — kicking off anyway"
-    tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+    if wait_for_input_prompt "$TARGET"; then
+      tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+    else
+      fallback="${ORCH_KICKOFF_FALLBACK_ENTER:-1}"
+      if [[ "$fallback" == "1" ]]; then
+        sleep 1
+        warn "input prompt not visible for $ID — sending delayed kickoff fallback"
+        log_line "KICKOFF_FALLBACK: id=$ID target=$TARGET reason=input_prompt_timeout"
+        tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+      else
+        warn "input prompt not visible for $ID — skipped kickoff Enter"
+        log_line "KICKOFF_SKIPPED: id=$ID target=$TARGET reason=input_prompt_timeout"
+      fi
+    fi
     ;;
   *)
     # codex / gemini: paste the full prompt file as the first message.
     wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID — pasting anyway"
     paste_to_pane "$TARGET" "$PROMPT_FILE"
+    # Codex occasionally leaves pasted content as draft input; one delayed
+    # extra Enter helps ensure submission without manual keypress.
+    if [[ "${ORCH_PASTE_EXTRA_ENTER:-1}" == "1" ]]; then
+      sleep 0.5
+      tmux send-keys -t "$TARGET" Enter
+    fi
     ;;
 esac
 

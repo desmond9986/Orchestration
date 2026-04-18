@@ -53,13 +53,13 @@ bash "$ORCHESTRATION_HOME/lib/protocol.sh" send <to_id> <TYPE> "<payload>" --fro
 
 Two delivery modes, controlled by `ORCH_DELIVERY` env var:
 
-- `notify` (default) — you see `# CHECK INBOX (<your_id>)` in your pane.
+- `notify` (default) — you see `check inbox(<your_id>) from:<sender>` in your pane.
 - `push` — the full message text is pasted directly into your pane;
   no need to poll.
 
 Regardless of mode, the durable inbox is JSONL at
 `.agents/inbox/<your_id>.jsonl`. At the start of each work cycle, or when you
-see the `CHECK INBOX` hint, run:
+see the `check inbox` hint, run:
 
 ```bash
 bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox <your_id>
