@@ -47,6 +47,11 @@ Break the goal into tasks. For each task:
 - **Output:** what DONE looks like
 - **Dependencies:** what must finish first
 
+When assigning via `TASK`, always include this contract (required by enforce):
+- `objective: <exact outcome>`
+- `definition_of_done: <verifiable checks>`
+- `required_reply: ACK|IN_PROGRESS|DONE|BLOCKED`
+
 Write the plan to `.agents/plan.md` for visibility.
 
 ## Step 3: Record tasks in the shared list
@@ -85,6 +90,12 @@ Respond to:
 - `QUESTION` → answer from context, or escalate to human
 - `VERDICT` → if PASS, mark task fully done. If FAIL/PARTIAL, send fixes
   back to the original coder
+
+Anti-loop rule:
+- Do **not** spam `STATUS` checks as pseudo-work assignment.
+- If an agent is idle, send a concrete `TASK` with contract fields.
+- Use `STATUS` only for high-level announcements (team-wide state).
+- If waiting for response, send at most one reminder per cooldown window.
 
 ## Step 5: Verify completion
 

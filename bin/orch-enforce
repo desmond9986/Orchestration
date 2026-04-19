@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# orch-enforce — active policy loop for inbox discipline and target health.
+# orch-enforce — active policy loop for inbox discipline and task-progress SLAs.
 #
 # Usage:
 #   orch-enforce --on [--interval <sec>]
@@ -17,21 +17,13 @@ set -euo pipefail
 export ORCHESTRATION_HOME
 source "$ORCHESTRATION_HOME/lib/common.sh"
 require_cmd jq
-require_cmd tmux
 
 usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
 
 export ORCH_PROJECT="${ORCH_PROJECT:-$PWD}"
-[[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
-
-ROSTER_LIB="$ORCHESTRATION_HOME/lib/roster.sh"
-
-PID_FILE="$(agents_dir)/enforce.pid"
-LOG_FILE="$(agents_dir)/enforce.log"
-HEARTBEAT_FILE="$(agents_dir)/enforce.heartbeat"
-INTERVAL_FILE="$(agents_dir)/enforce.interval"
 
 DEFAULT_INTERVAL="${ORCH_ENFORCE_INTERVAL:-90}"
+[[ "$DEFAULT_INTERVAL" =~ ^[0-9]+$ ]] || DEFAULT_INTERVAL=90
 MODE=""
 INTERVAL="$DEFAULT_INTERVAL"
 
@@ -54,6 +46,27 @@ done
 
 [[ -n "$MODE" ]] || MODE="status"
 
+PID_FILE="$(agents_dir)/enforce.pid"
+LOG_FILE="$(agents_dir)/enforce.log"
+HEARTBEAT_FILE="$(agents_dir)/enforce.heartbeat"
+INTERVAL_FILE="$(agents_dir)/enforce.interval"
+STATE_FILE="$(agents_dir)/enforce.state.json"
+CFG_FILE="$(agents_dir)/enforce.json"
+LOCK_FILE="$(agents_dir)/enforce.lock.d"
+ROSTER_LIB="$ORCHESTRATION_HOME/lib/roster.sh"
+
+needs_roster() {
+  case "$MODE" in
+    on|once|loop) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if needs_roster; then
+  require_cmd tmux
+  [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+fi
+
 pane_exists_exact() {
   local target="$1"
   tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
@@ -65,18 +78,67 @@ pane_agent_id() {
   tmux display-message -p -t "$target" '#{@orch_agent_id}' 2>/dev/null || true
 }
 
+pid_cmd_matches() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  local cmd
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+  [[ -n "$cmd" ]] || return 1
+  [[ "$cmd" == *"orch-enforce"* && "$cmd" == *"--loop"* ]]
+}
+
 pid_running() {
   [[ -f "$PID_FILE" ]] || return 1
   local pid
   pid=$(cat "$PID_FILE" 2>/dev/null || true)
   [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  pid_cmd_matches "$pid"
 }
 
 cleanup_stale_pid() {
   if [[ -f "$PID_FILE" ]] && ! pid_running; then
     rm -f "$PID_FILE"
   fi
+}
+
+cfg_init_defaults() {
+  mkdir -p "$(agents_dir)"
+  _num_or_default() {
+    local v="$1" d="$2"
+    [[ "$v" =~ ^[0-9]+$ ]] && printf "%s" "$v" || printf "%s" "$d"
+  }
+  local d_ack d_stale d_cool d_thr d_win
+  d_ack=$(_num_or_default "${ORCH_ENFORCE_ACK_TIMEOUT_SEC:-300}" 300)
+  d_stale=$(_num_or_default "${ORCH_ENFORCE_TASK_STALE_SEC:-1800}" 1800)
+  d_cool=$(_num_or_default "${ORCH_ENFORCE_REMINDER_COOLDOWN_SEC:-300}" 300)
+  d_thr=$(_num_or_default "${ORCH_ENFORCE_STATUS_LOOP_THRESHOLD:-3}" 3)
+  d_win=$(_num_or_default "${ORCH_ENFORCE_STATUS_LOOP_WINDOW_LINES:-200}" 200)
+  if [[ ! -f "$CFG_FILE" ]]; then
+    jq -n \
+      --argjson enabled false \
+      --argjson interval "$DEFAULT_INTERVAL" \
+      --argjson schema_required true \
+      --argjson ack_timeout_sec "$d_ack" \
+      --argjson task_stale_sec "$d_stale" \
+      --argjson reminder_cooldown_sec "$d_cool" \
+      --argjson status_loop_threshold "$d_thr" \
+      --argjson status_loop_window_lines "$d_win" \
+      '{
+        enabled:$enabled, interval_sec:$interval, schema_required:$schema_required,
+        ack_timeout_sec:$ack_timeout_sec, task_stale_sec:$task_stale_sec,
+        reminder_cooldown_sec:$reminder_cooldown_sec,
+        status_loop_threshold:$status_loop_threshold,
+        status_loop_window_lines:$status_loop_window_lines
+      }' > "$CFG_FILE"
+  fi
+}
+
+cfg_get_num() {
+  local key="$1" def="$2"
+  local v
+  v=$(jq -r --arg k "$key" '.[$k] // empty' "$CFG_FILE" 2>/dev/null || true)
+  [[ "$v" =~ ^[0-9]+$ ]] && printf "%s" "$v" || printf "%s" "$def"
 }
 
 recover_target_by_meta() {
@@ -97,8 +159,103 @@ recover_target_by_meta() {
   return 1
 }
 
+safe_send_line() {
+  local target="$1" line="$2"
+  tmux send-keys -t "$target" C-u 2>/dev/null || return 1
+  tmux send-keys -t "$target" "$line" 2>/dev/null || return 1
+  tmux send-keys -t "$target" Enter 2>/dev/null || return 1
+  return 0
+}
+
+latest_task_ts_for_agent() {
+  local id="$1"
+  local inbox archive
+  inbox="$(inbox_dir)/$id.jsonl"
+  archive="$(inbox_dir)/$id.archive.jsonl"
+  local files=()
+  [[ -f "$inbox" ]] && files+=("$inbox")
+  [[ -f "$archive" ]] && files+=("$archive")
+  if (( ${#files[@]} == 0 )); then
+    echo 0
+    return 0
+  fi
+  local iso
+  iso=$(cat "${files[@]}" 2>/dev/null \
+    | jq -sr --arg id "$id" '[ .[] | select(.to==$id and .type=="TASK") | .ts ] | max // ""' 2>/dev/null \
+    | tr -d '"')
+  [[ -n "$iso" ]] || { echo 0; return 0; }
+  date -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" "+%s" 2>/dev/null \
+    || date -u -d "$iso" "+%s" 2>/dev/null \
+    || echo 0
+}
+
+recent_done_or_blocked_count() {
+  local id="$1" lines="$2"
+  tail -n "$lines" "$(bus_file)" 2>/dev/null \
+    | grep -Ec "] $id → .*\\[(DONE|BLOCKED)\\]" || true
+}
+
+load_state() {
+  if [[ ! -f "$STATE_FILE" ]]; then
+    jq -n '{last_nudge:{}, last_policy:{}}' > "$STATE_FILE"
+  fi
+}
+
+state_last_nudge() {
+  local id="$1"
+  jq -r --arg id "$id" '.last_nudge[$id] // 0' "$STATE_FILE" 2>/dev/null || echo 0
+}
+
+state_set_last_nudge() {
+  local id="$1" ts="$2"
+  local tmp; tmp=$(mktemp)
+  jq --arg id "$id" --argjson ts "$ts" '.last_nudge[$id]=$ts' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+policy_last_logged() {
+  local key="$1"
+  jq -r --arg k "$key" '.last_policy[$k] // 0' "$STATE_FILE" 2>/dev/null || echo 0
+}
+
+policy_set_logged() {
+  local key="$1" ts="$2"
+  local tmp; tmp=$(mktemp)
+  jq --arg k "$key" --argjson ts "$ts" '.last_policy[$k]=$ts' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+check_orchestrator_status_loop() {
+  local now="$1" threshold="$2" window_lines="$3" cooldown="$4"
+  local aid status_count task_count key prev
+  while IFS= read -r aid; do
+    [[ -n "$aid" ]] || continue
+    status_count=$(tail -n "$window_lines" "$(bus_file)" 2>/dev/null | grep -Ec "] orchestrator → $aid  \\[STATUS\\]" || true)
+    task_count=$(tail -n "$window_lines" "$(bus_file)" 2>/dev/null | grep -Ec "] orchestrator → $aid  \\[TASK\\]" || true)
+    if (( status_count >= threshold && task_count == 0 )); then
+      key="status_loop:$aid"
+      prev=$(policy_last_logged "$key")
+      if (( now - prev >= cooldown )); then
+        status_line "orchestration" "POLICY: orchestrator status-loop to $aid (status=$status_count task=$task_count in last $window_lines lines)"
+        log_line "ENFORCE_POLICY_STATUS_LOOP: to=$aid status=$status_count task=$task_count window_lines=$window_lines"
+        policy_set_logged "$key" "$now"
+      fi
+    fi
+  done < <(jq -r '.agents[] | select(.status=="active") | .id' "$(roster_file)")
+}
+
 run_cycle() {
-  local nudged=0 healed=0 unreachable=0 mismatched=0
+  cfg_init_defaults
+  load_state
+
+  local now
+  now=$(date +%s)
+  local ack_timeout stale_timeout cooldown status_loop_threshold status_loop_window
+  ack_timeout=$(cfg_get_num ack_timeout_sec 300)
+  stale_timeout=$(cfg_get_num task_stale_sec 1800)
+  cooldown=$(cfg_get_num reminder_cooldown_sec 300)
+  status_loop_threshold=$(cfg_get_num status_loop_threshold 3)
+  status_loop_window=$(cfg_get_num status_loop_window_lines 200)
+
+  local nudged=0 healed=0 unreachable=0 mismatched=0 unverified=0 violations=0
   local oh="$ORCHESTRATION_HOME"
 
   while IFS= read -r row; do
@@ -111,10 +268,15 @@ run_cycle() {
       local recovered
       recovered=$(recover_target_by_meta "$id" || true)
       if [[ -n "$recovered" ]]; then
-        bash "$ROSTER_LIB" retarget "$id" "$recovered" >/dev/null 2>&1 || true
-        target="$recovered"
-        healed=$((healed + 1))
-        log_line "ENFORCE_HEAL: $id -> $target"
+        if bash "$ROSTER_LIB" retarget "$id" "$recovered" >/dev/null 2>&1; then
+          target="$recovered"
+          healed=$((healed + 1))
+          log_line "ENFORCE_HEAL: $id -> $target"
+        else
+          log_line "ENFORCE_HEAL_FAIL: $id recovered=$recovered"
+          unreachable=$((unreachable + 1))
+          continue
+        fi
       else
         unreachable=$((unreachable + 1))
         log_line "ENFORCE_UNREACHABLE: $id target=$target"
@@ -124,7 +286,12 @@ run_cycle() {
 
     local meta
     meta=$(pane_agent_id "$target")
-    if [[ -n "$meta" && "$meta" != "$id" ]]; then
+    if [[ -z "$meta" ]]; then
+      unverified=$((unverified + 1))
+      log_line "ENFORCE_UNVERIFIED: $id target=$target missing=@orch_agent_id"
+      continue
+    fi
+    if [[ "$meta" != "$id" ]]; then
       mismatched=$((mismatched + 1))
       log_line "ENFORCE_MISMATCH: $id target=$target has=$meta"
       continue
@@ -133,22 +300,63 @@ run_cycle() {
     local inbox unread
     inbox="$(inbox_dir)/$id.jsonl"
     unread=0
-    [[ -f "$inbox" ]] && unread=$(wc -l < "$inbox" | tr -d ' ')
+    unread=$(wc -l < "$inbox" 2>/dev/null | tr -d ' ' || true)
+    [[ "$unread" =~ ^[0-9]+$ ]] || unread=0
+
+    local task_ts task_age done_or_blocked
+    task_ts=$(latest_task_ts_for_agent "$id")
+    [[ "$task_ts" =~ ^[0-9]+$ ]] || task_ts=0
+    task_age=0
+    (( task_ts > 0 )) && task_age=$((now - task_ts))
+    done_or_blocked=$(recent_done_or_blocked_count "$id" "$status_loop_window")
+    [[ "$done_or_blocked" =~ ^[0-9]+$ ]] || done_or_blocked=0
+
+    if (( task_age > ack_timeout && unread > 0 )); then
+      violations=$((violations + 1))
+      log_line "ENFORCE_SLA_ACK: $id unread=$unread task_age=${task_age}s timeout=${ack_timeout}s"
+    fi
+    if (( task_age > stale_timeout && done_or_blocked == 0 )); then
+      violations=$((violations + 1))
+      log_line "ENFORCE_SLA_STALE: $id task_age=${task_age}s stale=${stale_timeout}s done_or_blocked_recent=0"
+    fi
+
     if (( unread > 0 )); then
-      local msg
-      msg="SYSTEM REMINDER: You have $unread unread orchestration inbox message(s). Read now with: bash $oh/lib/protocol.sh check-inbox $id . Then reply only via protocol.sh send or protocol.sh status."
-      tmux send-keys -t "$target" C-u
-      tmux send-keys -t "$target" "$msg"
-      tmux send-keys -t "$target" Enter
-      nudged=$((nudged + 1))
+      local last_nudge
+      last_nudge=$(state_last_nudge "$id")
+      [[ "$last_nudge" =~ ^[0-9]+$ ]] || last_nudge=0
+      if (( now - last_nudge >= cooldown )); then
+        local msg
+        msg="SYSTEM REMINDER: unread inbox=$unread. Run now: bash $oh/lib/protocol.sh check-inbox $id ; then send ACK/IN_PROGRESS/DONE/BLOCKED via protocol.sh."
+        if safe_send_line "$target" "$msg"; then
+          nudged=$((nudged + 1))
+          state_set_last_nudge "$id" "$now"
+        else
+          log_line "ENFORCE_SEND_FAIL: $id target=$target"
+        fi
+      fi
     fi
   done < <(jq -rc '.agents[] | select(.status=="active") | {id,target}' "$(roster_file)")
 
-  printf "%s\n" "cycle nudged=$nudged healed=$healed unreachable=$unreachable mismatched=$mismatched"
-  printf "%s\n" "$(date +%s)" > "$HEARTBEAT_FILE"
+  check_orchestrator_status_loop "$now" "$status_loop_threshold" "$status_loop_window" "$cooldown"
+
+  printf "%s\n" "cycle nudged=$nudged healed=$healed unreachable=$unreachable mismatched=$mismatched unverified=$unverified violations=$violations"
+  printf "%s\n" "$now" > "$HEARTBEAT_FILE"
 }
 
 start_loop() {
+  cfg_init_defaults
+  cleanup_stale_pid
+  if pid_running; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    info "orch-enforce already running (pid=$pid)"
+    return 0
+  fi
+
+  with_file_lock "$LOCK_FILE" _start_loop_locked
+}
+
+_start_loop_locked() {
   cleanup_stale_pid
   if pid_running; then
     local pid
@@ -158,7 +366,8 @@ start_loop() {
   fi
 
   printf "%s\n" "$INTERVAL" > "$INTERVAL_FILE"
-  : > "$LOG_FILE"
+  local tmp; tmp=$(mktemp)
+  jq --argjson enabled true --argjson interval "$INTERVAL" '.enabled=$enabled | .interval_sec=$interval' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
   nohup env \
     ORCHESTRATION_HOME="$ORCHESTRATION_HOME" \
     ORCH_PROJECT="$ORCH_PROJECT" \
@@ -169,24 +378,48 @@ start_loop() {
 }
 
 stop_loop() {
+  cfg_init_defaults
   cleanup_stale_pid
-  if ! pid_running; then
+  local tmp; tmp=$(mktemp)
+  jq '.enabled=false' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
+
+  if ! [[ -f "$PID_FILE" ]]; then
     info "orch-enforce is already off"
-    rm -f "$PID_FILE"
     return 0
   fi
+
   local pid
-  pid=$(cat "$PID_FILE")
-  kill "$pid" 2>/dev/null || true
-  sleep 0.1
-  kill -9 "$pid" 2>/dev/null || true
+  pid=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
+    rm -f "$PID_FILE"
+    info "orch-enforce is already off"
+    return 0
+  fi
+
+  if ! pid_cmd_matches "$pid"; then
+    rm -f "$PID_FILE"
+    warn "stale enforce pid removed (pid=$pid)"
+    return 0
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    sleep 0.2
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+  done
+  if kill -0 "$pid" 2>/dev/null && pid_cmd_matches "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   rm -f "$PID_FILE"
   ok "orch-enforce stopped"
 }
 
 show_status() {
+  cfg_init_defaults
   cleanup_stale_pid
-  local interval hb age
+  local interval hb age enabled schema
   interval="$DEFAULT_INTERVAL"
   [[ -f "$INTERVAL_FILE" ]] && interval=$(cat "$INTERVAL_FILE" 2>/dev/null || echo "$DEFAULT_INTERVAL")
   hb=0
@@ -195,14 +428,16 @@ show_status() {
   if [[ "$hb" =~ ^[0-9]+$ ]] && (( hb > 0 )); then
     age="$(( $(date +%s) - hb ))s"
   fi
+  enabled=$(jq -r '.enabled // false' "$CFG_FILE" 2>/dev/null || echo false)
+  schema=$(jq -r '.schema_required // false' "$CFG_FILE" 2>/dev/null || echo false)
 
   if pid_running; then
     local pid
     pid=$(cat "$PID_FILE")
-    printf "%s\n" "orch-enforce: ON (pid=$pid interval=${interval}s heartbeat_age=$age)"
+    printf "%s\n" "orch-enforce: ON (pid=$pid interval=${interval}s heartbeat_age=$age enabled=$enabled schema_required=$schema)"
     exit 0
   fi
-  printf "%s\n" "orch-enforce: OFF (interval=${interval}s last_heartbeat_age=$age)"
+  printf "%s\n" "orch-enforce: OFF (interval=${interval}s last_heartbeat_age=$age enabled=$enabled schema_required=$schema)"
   exit 1
 }
 
@@ -218,7 +453,7 @@ case "$MODE" in
   on) start_loop ;;
   off) stop_loop ;;
   status) show_status ;;
-  once) run_cycle ;;
-  loop) loop_forever ;;
+  once) cfg_init_defaults; run_cycle ;;
+  loop) cfg_init_defaults; loop_forever ;;
   *) die "invalid mode: $MODE" ;;
 esac

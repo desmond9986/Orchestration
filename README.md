@@ -428,6 +428,10 @@ orch-enforce --off
 retarget healing, and nudges panes with unread inbox backlog so agents are
 repeatedly forced back to protocol commands.
 
+When enforce is ON, protocol schema validation is also enabled:
+- `TASK` payload must include: `objective:`, `definition_of_done:`, `required_reply:`
+- `DONE` payload must include: `commit_hash:`, `changed_files:`, `test_result:`
+
 ## Shared task list
 
 For multi-step work, agents coordinate through `.agents/tasks.json` instead
@@ -549,6 +553,10 @@ bash $ORCHESTRATION_HOME/lib/protocol.sh status <your_id> "<message>"
 
 Message types: `TASK`, `STATUS`, `DONE`, `BLOCKED`, `QUESTION`,
 `REVIEW_REQUEST`, `VERDICT`, `INFO`.
+
+If `.agents/enforce.json` has `"schema_required": true`, `protocol.sh send`
+rejects malformed `TASK`/`DONE` payloads that do not contain the required
+contract fields.
 
 ## Design decisions
 

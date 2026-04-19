@@ -35,6 +35,7 @@ new_msg_id() { echo "msg-$(date +%s)-$$-$RANDOM-$RANDOM"; }
 inbox_path()   { echo "$(inbox_dir)/$1.jsonl"; }
 archive_path() { echo "$(inbox_dir)/$1.archive.jsonl"; }
 inbox_lock()   { echo "$(inbox_dir)/$1.lock.d"; }
+enforce_cfg_path() { echo "$(agents_dir)/enforce.json"; }
 valid_agent_id() { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
 normalize_agent_label() {
   local s="$1"
@@ -48,6 +49,42 @@ normalize_agent_label() {
 # Keeps logs readable and prevents terminal escape/control injection.
 sanitize_for_pane() {
   printf "%s" "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+}
+
+schema_required_enabled() {
+  [[ -f "$(enforce_cfg_path)" ]] || return 1
+  jq -e '(.enabled == true) and (.schema_required == true)' "$(enforce_cfg_path)" >/dev/null 2>&1
+}
+
+payload_has_key() {
+  local payload="$1" key="$2"
+  printf "%s" "$payload" | grep -Eiq "(^|[^[:alnum:]_])\"?$key\"?[[:space:]]*[:=]"
+}
+
+validate_message_schema() {
+  local type="$1" payload="$2"
+  schema_required_enabled || return 0
+
+  local missing=()
+  case "$type" in
+    TASK)
+      payload_has_key "$payload" "objective" || missing+=("objective")
+      payload_has_key "$payload" "definition_of_done" || missing+=("definition_of_done")
+      payload_has_key "$payload" "required_reply" || missing+=("required_reply")
+      ;;
+    DONE)
+      payload_has_key "$payload" "commit_hash" || missing+=("commit_hash")
+      payload_has_key "$payload" "changed_files" || missing+=("changed_files")
+      payload_has_key "$payload" "test_result" || missing+=("test_result")
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if (( ${#missing[@]} > 0 )); then
+    die "schema validation failed for $type — missing: $(IFS=,; echo "${missing[*]}"). Include key:value fields in payload."
+  fi
 }
 
 pane_exists() {
@@ -311,6 +348,7 @@ deliver_push() {
 cmd_send() {
   local to="$1" type="$2" payload="$3"; shift 3
   local from="${USER:-unknown}"
+  type=$(printf "%s" "$type" | tr '[:lower:]' '[:upper:]')
   valid_agent_id "$to" || die "invalid recipient id '$to' (allowed: [A-Za-z0-9_-])"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -322,6 +360,8 @@ cmd_send() {
       *) die "unknown flag: $1" ;;
     esac
   done
+
+  validate_message_schema "$type" "$payload"
 
   # Only gate on active roster membership here. Delivery reachability is
   # handled later so inbox writes remain durable even when tmux is unavailable.

@@ -715,6 +715,17 @@ test_enforce() {
   out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --status 2>&1) || rc=$?
   assert_eq "0" "$rc" "orch-enforce --status is zero when running"
   assert_contains "$out" "ON" "orch-enforce status shows ON"
+  assert_contains "$out" "schema_required=true" "orch-enforce enables schema-required policy"
+
+  # With schema enforcement on, malformed TASK/DONE must be rejected.
+  assert_fails "schema rejects malformed TASK payload" \
+    bash -c 'cd "'"$dir"'" && ORCH_DELIVERY=silent bash "'"$ORCHESTRATION_HOME"'/lib/protocol.sh" send coder-1 TASK "hello" --from orchestrator'
+  bash -c 'cd "'"$dir"'" && ORCH_DELIVERY=silent bash "'"$ORCHESTRATION_HOME"'/lib/protocol.sh" send coder-1 TASK "objective: ship; definition_of_done: tests pass; required_reply: ACK" --from orchestrator' \
+    >/dev/null 2>&1 || fail "schema accepts valid TASK payload"
+  assert_fails "schema rejects malformed DONE payload" \
+    bash -c 'cd "'"$dir"'" && ORCH_DELIVERY=silent bash "'"$ORCHESTRATION_HOME"'/lib/protocol.sh" send coder-1 DONE "done" --from coder-1'
+  bash -c 'cd "'"$dir"'" && ORCH_DELIVERY=silent bash "'"$ORCHESTRATION_HOME"'/lib/protocol.sh" send coder-1 DONE "commit_hash: abc123; changed_files: a,b; test_result: pass" --from coder-1' \
+    >/dev/null 2>&1 || fail "schema accepts valid DONE payload"
 
   rc=0
   out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --off 2>&1) || rc=$?
@@ -724,6 +735,10 @@ test_enforce() {
   out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-enforce" --status 2>&1) || rc=$?
   assert_eq "1" "$rc" "orch-enforce --status is non-zero when off"
   assert_contains "$out" "OFF" "orch-enforce status shows OFF"
+
+  # With enforce OFF, schema gate should no longer block free-form payloads.
+  bash -c 'cd "'"$dir"'" && ORCH_DELIVERY=silent bash "'"$ORCHESTRATION_HOME"'/lib/protocol.sh" send coder-1 TASK "free form task allowed when enforce off" --from orchestrator' \
+    >/dev/null 2>&1 || fail "schema is disabled when enforce is off"
 
   rm -rf "$dir"
   trap - RETURN
