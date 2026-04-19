@@ -244,15 +244,22 @@ deliver_notify() {
   sleep 0.1
   # Prefix with ':' so shell panes treat it as no-op, while CLIs still see the
   # human-readable hint text.
-  local marker
+  local marker hint strict_ack
   marker="m$(printf "%s" "$msg_id" | cksum | awk '{print $1}')"
+  strict_ack="${ORCH_NOTIFY_STRICT_ACK:-0}"
+  hint=": check-inbox $safe_id from:$safe_from"
+  # Only append the internal marker when strict marker-ack is enabled.
+  # Otherwise keep pane hints clean to avoid confusion with real msg ids.
+  if [[ "$strict_ack" == "1" ]]; then
+    hint="$hint $marker"
+  fi
   # Use check-inbox without shell glob chars so zsh panes do not error.
-  tmux send-keys -t "$target" ": check-inbox $safe_id from:$safe_from $marker" 2>/dev/null || { rm -rf "$lockdir"; trap - INT TERM EXIT; return 1; }
+  tmux send-keys -t "$target" "$hint" 2>/dev/null || { rm -rf "$lockdir"; trap - INT TERM EXIT; return 1; }
   sleep 0.1
   tmux send-keys -t "$target" C-m 2>/dev/null || { rm -rf "$lockdir"; trap - INT TERM EXIT; return 1; }
   # Optional strict marker ack. Disabled by default because wrapped lines can
   # split marker text and create false negatives.
-  if [[ "${ORCH_NOTIFY_STRICT_ACK:-0}" == "1" ]]; then
+  if [[ "$strict_ack" == "1" ]]; then
     if ! wait_for_delivery_token "$target" "$marker"; then
       rm -rf "$lockdir"
       trap - INT TERM EXIT
