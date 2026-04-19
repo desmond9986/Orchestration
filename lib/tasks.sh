@@ -18,7 +18,7 @@
 #
 # Deps: a task is "available" only when every task in depends_on is done.
 # When a task transitions to done, any dependents that became fully unblocked
-# are announced via broadcast (STATUS "task <id> available").
+# are announced to active orchestrator/coder agents only (throttled INFO).
 #
 # Storage: .agents/tasks.json
 #   { tasks: [ {id, title, status, owner, depends_on, note, created,
@@ -35,11 +35,16 @@ PROTOCOL_LIB="$(dirname "${BASH_SOURCE[0]}")/protocol.sh"
 
 tasks_file() { echo "$(agents_dir)/tasks.json"; }
 tasks_lock() { echo "$(agents_dir)/tasks.lock.d"; }
+notify_state_file() { echo "$(agents_dir)/tasks.notify.json"; }
+notify_cooldown_sec() { echo "${ORCH_TASK_NOTIFY_COOLDOWN_SEC:-300}"; }
 
 ensure_tasks_file() {
   ensure_agents_dir
   if [[ ! -f "$(tasks_file)" ]]; then
     jq -n '{tasks:[]}' > "$(tasks_file)"
+  fi
+  if [[ ! -f "$(notify_state_file)" ]]; then
+    jq -n '{last:{}}' > "$(notify_state_file)"
   fi
 }
 
@@ -100,6 +105,41 @@ _deps_done() {
     | select($by[.] != "done")
   ' "$(tasks_file)")
   [[ -z "$unmet" ]]
+}
+
+_active_notify_recipients() {
+  jq -r '
+    .agents[]
+    | select(.status=="active")
+    | select(.role=="orchestrator" or .role=="coder")
+    | .id
+  ' "$(roster_file)" 2>/dev/null
+}
+
+_notify_available_throttled() {
+  local task_id="$1" from_id="$2" reason="$3"
+  local cooldown now key last
+  cooldown=$(notify_cooldown_sec)
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=300
+  now=$(date +%s)
+  key="$reason:$task_id"
+  last=$(jq -r --arg k "$key" '.last[$k] // 0' "$(notify_state_file)" 2>/dev/null || echo 0)
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+
+  if (( now - last < cooldown )); then
+    return 0
+  fi
+
+  local id payload
+  payload="task $task_id now available; claim with: bash \$ORCHESTRATION_HOME/lib/tasks.sh claim $task_id <agent_id>"
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    [[ "$id" == "$from_id" ]] && continue
+    bash "$PROTOCOL_LIB" send "$id" INFO "$payload" --from "$from_id" 2>/dev/null || true
+  done < <(_active_notify_recipients)
+
+  local tmp; tmp=$(mktemp)
+  jq --arg k "$key" --argjson now "$now" '.last[$k]=$now' "$(notify_state_file)" > "$tmp" && mv "$tmp" "$(notify_state_file)"
 }
 
 _do_claim() {
@@ -164,7 +204,7 @@ _do_complete() {
   ' "$(tasks_file)" | _write_tasks
   ok "completed: $task_id by $agent"
 
-  # Find dependents that just became available — announce them.
+  # Find dependents that just became available — announce in targeted, throttled INFO.
   local newly_ready
   newly_ready=$(jq -r --arg id "$task_id" '
     (.tasks | map({key:.id, value:.status}) | from_entries) as $by
@@ -176,9 +216,7 @@ _do_complete() {
   ' "$(tasks_file)")
 
   for rid in $newly_ready; do
-    # Fire-and-forget announcement; don't let broadcast failure block completion.
-    bash "$PROTOCOL_LIB" broadcast STATUS "task $rid now available (deps satisfied)" \
-      --from "$agent" 2>/dev/null || true
+    _notify_available_throttled "$rid" "$agent" "deps_ready"
   done
 }
 
@@ -243,9 +281,8 @@ _do_unblock() {
   ' "$(tasks_file)" | _write_tasks
   ok "unblocked: $task_id by $agent"
 
-  # Announce that the task is available again.
-  bash "$PROTOCOL_LIB" broadcast STATUS "task $task_id unblocked and available" \
-    --from "$agent" 2>/dev/null || true
+  # Announce that the task is available again (targeted/throttled).
+  _notify_available_throttled "$task_id" "$agent" "unblocked"
 }
 
 cmd_create()   { with_lock _do_create   "$@"; }
