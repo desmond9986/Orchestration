@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq tmux shellcheck
+
+      - name: Lint shell scripts
+        run: |
+          shellcheck -e SC1090,SC1091 bin/* lib/*.sh patterns/*.sh install.sh tests/smoke.sh
+
+      - name: Syntax check
+        run: |
+          for f in bin/* lib/*.sh patterns/*.sh tests/smoke.sh install.sh; do
+            bash -n "$f"
+          done
+
+      - name: Smoke tests
+        run: bash tests/smoke.sh all

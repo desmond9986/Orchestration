@@ -10,3 +10,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Env
+.env
+.env.*
+!.env.example

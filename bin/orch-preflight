@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# orch-preflight — quick local validation before starting orchestration.
+#
+# Usage:
+#   orch-preflight
+#   ORCH_PROJECT=/path/to/project orch-preflight
+
+set -euo pipefail
+
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+PROJECT="${ORCH_PROJECT:-$PWD}"
+AGENTS_DIR="$PROJECT/.agents"
+ROSTER="$AGENTS_DIR/roster.json"
+
+missing=0
+warnings=0
+
+check_cmd() {
+  local c="$1"
+  if command -v "$c" >/dev/null 2>&1; then
+    ok "dependency: $c"
+  else
+    warn "missing dependency: $c"
+    missing=1
+  fi
+}
+
+check_hasher() {
+  if command -v shasum >/dev/null 2>&1 \
+    || command -v sha1sum >/dev/null 2>&1 \
+    || command -v cksum >/dev/null 2>&1; then
+    ok "dependency: hasher"
+  else
+    warn "missing dependency: pane hasher (shasum/sha1sum/cksum)"
+    missing=1
+  fi
+}
+
+check_roster_integrity() {
+  [[ -f "$ROSTER" ]] || { warn "no roster yet at $ROSTER"; warnings=$((warnings+1)); return 0; }
+  if ! jq empty "$ROSTER" >/dev/null 2>&1; then
+    warn "roster.json is not valid JSON"
+    missing=1
+    return 0
+  fi
+
+  local dup
+  dup=$(jq -r '[.agents[].id] | group_by(.)[] | select(length>1) | .[0]' "$ROSTER" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  if [[ -n "$dup" ]]; then
+    warn "duplicate agent id(s): $dup"
+    missing=1
+  else
+    ok "roster integrity: unique agent ids"
+  fi
+}
+
+check_skip_env() {
+  local found=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      ORCH_SKIP_PERMISSIONS|ORCH_SKIP_PERMISSIONS_*)
+        if [[ "${v:-0}" == "1" ]]; then
+          found+="$k "
+        fi
+        ;;
+    esac
+  done < <(env)
+  if [[ -n "$found" ]]; then
+    warn "permission bypass env is enabled: $found"
+    warn "for safer public runs, unset these or avoid --respect-env-skip-permissions"
+    warnings=$((warnings+1))
+  else
+    ok "permission bypass env: off"
+  fi
+}
+
+info "preflight project: $PROJECT"
+check_cmd tmux
+check_cmd jq
+check_hasher
+check_roster_integrity
+check_skip_env
+
+if [[ "$missing" -eq 1 ]]; then
+  printf "\nOverall: FAIL\n"
+  exit 1
+fi
+
+if [[ "$warnings" -gt 0 ]]; then
+  printf "\nOverall: PASS_WITH_WARNINGS\n"
+  exit 0
+fi
+
+printf "\nOverall: PASS\n"

@@ -717,6 +717,28 @@ test_enforce() {
   cleanup_enforce_tmux
 }
 
+# ── orch-preflight ───────────────────────────────────────────────────────
+test_preflight() {
+  printf "\n\033[1morch-preflight\033[0m\n"
+  fresh_project; local dir="$ORCH_PROJECT"
+  local out rc
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-preflight" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-preflight exits cleanly on initialized project"
+  assert_contains "$out" "Overall: PASS" "orch-preflight reports PASS"
+
+  # Duplicate ids should be flagged as a hard failure.
+  local roster="$dir/.agents/roster.json"
+  jq '.agents += [{"id":"a1","role":"coder","model":"codex","target":"x:0.0","status":"active"},{"id":"a1","role":"coder","model":"codex","target":"x:0.1","status":"active"}]' \
+    "$roster" > "$roster.tmp" && mv "$roster.tmp" "$roster"
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-preflight" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "orch-preflight fails on duplicate ids"
+  assert_contains "$out" "duplicate agent id(s): a1" "orch-preflight reports duplicate ids"
+
+  rm -rf "$dir"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
@@ -728,9 +750,10 @@ case "$SUITE" in
   end-session)  test_end_session ;;
   model-select) test_model_select ;;
   enforce)      test_enforce ;;
+  preflight)    test_preflight ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 
