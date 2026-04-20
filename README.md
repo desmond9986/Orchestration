@@ -42,6 +42,20 @@ orchestrate lean                    # 1 orchestrator (with architect hat) + 2 co
 Tmux will attach automatically. One pane per agent. Each agent sees its
 role, the communication protocol, project context, and their identity.
 
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Open-source checklist
+
+Before publishing publicly:
+
+- Confirm no secrets or private data in git history
+- Ensure .agents/ and runtime artifacts are gitignored
+- Review third-party license compatibility
+- Add security contact and disclosure policy (SECURITY.md)
+- Add contribution and behavior guidelines (CONTRIBUTING.md, CODE_OF_CONDUCT.md)
+
 ## Future improvements (usability roadmap)
 
 Current pain point: operating everything via many separate commands is hard to
@@ -939,7 +953,3 @@ snapshot. Copy it back, verify with `jq`, then re-run the failed command.
 - **Add a hat:** drop `roles/hats/<name>.md`, pass `--hats <name>` at spawn
 - **Add a pattern:** drop `patterns/<name>.sh`, call spawn-agent for each member
 - **Add a model:** edit the `launch_cli_cmd` case in `lib/spawn-agent.sh`
-
-## License
-
-MIT — do whatever.
