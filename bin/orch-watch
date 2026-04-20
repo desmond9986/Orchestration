@@ -49,7 +49,23 @@ done
 
 export ORCH_PROJECT="$PWD"
 [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
-[[ -r "$(roster_file)" ]] || die "cannot read $(roster_file) (check file permissions / macOS privacy access)"
+
+show_roster_access_help() {
+  local rf
+  rf="$(roster_file)"
+  clear
+  printf '%berror:%b cannot read roster file\n' "$C_RED" "$C_RESET"
+  printf '  %s\n' "$rf"
+  echo ""
+  printf '%bLikely cause:%b macOS privacy/permissions (Desktop/Documents) or file ACLs.\n' "$C_BOLD" "$C_RESET"
+  printf '%bQuick checks:%b\n' "$C_BOLD" "$C_RESET"
+  printf '  - ls -leO "%s"\n' "$rf"
+  printf '  - chmod u+rw "%s"\n' "$rf"
+  printf '  - chmod u+rwx "%s"\n' "$(agents_dir)"
+  printf '  - grant your terminal app Full Disk Access (macOS), then retry\n'
+  echo ""
+  printf '%bRetrying in %ss... (Ctrl-C to exit)%b\n' "$C_DIM" "$INTERVAL" "$C_RESET"
+}
 
 hr() {
   local cols
@@ -108,6 +124,10 @@ signal_for_agent() {
 }
 
 render() {
+  if [[ ! -r "$(roster_file)" ]]; then
+    show_roster_access_help
+    return 0
+  fi
   clear
   printf '%borchestration watch%b %b(%s refresh=%ss)%b\n' \
     "$C_BOLD" "$C_RESET" "$C_DIM" "$(date +%H:%M:%S)" "$INTERVAL" "$C_RESET"
