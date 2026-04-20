@@ -50,11 +50,16 @@ done
 export ORCH_PROJECT="$PWD"
 [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
 
-hr() { printf '%.0s─' $(seq 1 $(tput cols 2>/dev/null || echo 100)); echo; }
+hr() {
+  local cols
+  cols="$(tput cols 2>/dev/null || echo 100)"
+  printf '%*s\n' "$cols" '' | tr ' ' '─'
+}
 
 inbox_unread() {
   local id="$1"
-  local p="$(inbox_dir)/$id.jsonl"
+  local p
+  p="$(inbox_dir)/$id.jsonl"
   [[ -f "$p" ]] || { echo 0; return; }
   wc -l < "$p" 2>/dev/null | tr -d ' ' || echo 0
 }

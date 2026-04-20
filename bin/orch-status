@@ -53,13 +53,13 @@ case "${1:-}" in
     ;;
   "")
     [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
-    printf "${C_BOLD}Roster:${C_RESET}\n"
+    printf '%s\n' "${C_BOLD}Roster:${C_RESET}"
     bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
     echo ""
-    printf "${C_BOLD}Recent bus activity (last 20 lines):${C_RESET}\n"
+    printf '%s\n' "${C_BOLD}Recent bus activity (last 20 lines):${C_RESET}"
     tail -20 "$(bus_file)" 2>/dev/null || echo "(none)"
     echo ""
-    printf "${C_DIM}tip: run 'orch-status --follow' to watch live${C_RESET}\n"
+    printf '%s\n' "${C_DIM}tip: run 'orch-status --follow' to watch live${C_RESET}"
     ;;
   *) die "unknown option: $1 (try: orch-status --help)" ;;
 esac
