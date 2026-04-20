@@ -49,6 +49,7 @@ done
 
 export ORCH_PROJECT="$PWD"
 [[ -f "$(roster_file)" ]] || die "no session in $(agents_dir)"
+[[ -r "$(roster_file)" ]] || die "cannot read $(roster_file) (check file permissions / macOS privacy access)"
 
 hr() {
   local cols
@@ -108,11 +109,11 @@ signal_for_agent() {
 
 render() {
   clear
-  printf '%sorchestration watch%s %s(%s refresh=%ss)%s\n' \
+  printf '%borchestration watch%b %b(%s refresh=%ss)%b\n' \
     "$C_BOLD" "$C_RESET" "$C_DIM" "$(date +%H:%M:%S)" "$INTERVAL" "$C_RESET"
   hr
 
-  printf '%s\n' "${C_BOLD}Agent Signals${C_RESET}"
+  printf '%b\n' "${C_BOLD}Agent Signals${C_RESET}"
   printf "%-14s %-12s %-6s %-17s %-8s %-10s %-10s\n" "agent" "role" "unread" "signal" "target" "last→time" "last←time"
   hr
 
@@ -130,23 +131,23 @@ render() {
       done
   echo ""
 
-  printf '%s\n' "${C_BOLD}Recent Bus${C_RESET}"
+  printf '%b\n' "${C_BOLD}Recent Bus${C_RESET}"
   hr
   tail -8 "$(bus_file)" 2>/dev/null || echo "(empty)"
 
   if (( PANE_LINES > 0 )); then
     echo ""
-    printf '%sPane Tails%s %s(last %s lines)%s\n' \
+    printf '%bPane Tails%b %b(last %s lines)%b\n' \
       "$C_BOLD" "$C_RESET" "$C_DIM" "$PANE_LINES" "$C_RESET"
     hr
     jq -r '.agents[] | select(.status=="active") | "\(.id)\t\(.target)"' "$(roster_file)" \
       | while IFS=$'\t' read -r id target; do
-          printf '%s▸ %s%s %s(%s)%s\n' \
+          printf '%b▸ %s%b %b(%s)%b\n' \
             "$C_BLUE" "$id" "$C_RESET" "$C_DIM" "$target" "$C_RESET"
           if tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -Fxq "$target"; then
             tmux capture-pane -t "$target" -p 2>/dev/null | grep -v '^$' | tail -n "$PANE_LINES" | sed 's/^/  │ /'
           else
-            printf '  %s│ (pane not found)%s\n' "$C_YELLOW" "$C_RESET"
+            printf '  %b│ (pane not found)%b\n' "$C_YELLOW" "$C_RESET"
           fi
           echo ""
         done
