@@ -28,6 +28,7 @@ ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 ts_short() { date +"%H:%M:%S"; }
 
 # Color helpers (skip if not a tty)
+# shellcheck disable=SC2034
 if [[ -t 1 ]]; then
   C_RESET='\033[0m'; C_DIM='\033[2m'; C_RED='\033[31m'; C_GREEN='\033[32m'
   C_YELLOW='\033[33m'; C_BLUE='\033[34m'; C_BOLD='\033[1m'

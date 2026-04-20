@@ -270,8 +270,11 @@ test_tasks() {
   local avail
   avail=$(bash "$ORCHESTRATION_HOME/lib/tasks.sh" list-available | tr -s ' ')
   assert_contains "$avail" "t-a" "list-available shows t-a"
-  [[ "$avail" != *"t-b"* ]] && pass "list-available hides dep-blocked t-b" \
-                             || fail "list-available must hide t-b"
+  if [[ "$avail" != *"t-b"* ]]; then
+    pass "list-available hides dep-blocked t-b"
+  else
+    fail "list-available must hide t-b"
+  fi
 
   # Atomic claim
   bash "$ORCHESTRATION_HOME/lib/tasks.sh" claim t-a c1 >/dev/null
@@ -296,8 +299,11 @@ test_tasks() {
 
   # #1: blocked is NOT in list-available
   avail=$(bash "$ORCHESTRATION_HOME/lib/tasks.sh" list-available | tr -s ' ')
-  [[ "$avail" != *"t-b"* ]] && pass "blocked task not in list-available (#1)" \
-                             || fail "blocked task must not appear in list-available (#1)"
+  if [[ "$avail" != *"t-b"* ]]; then
+    pass "blocked task not in list-available (#1)"
+  else
+    fail "blocked task must not appear in list-available (#1)"
+  fi
 
   # #1: cannot re-claim blocked directly
   assert_fails "cannot claim a blocked task (#1)" \
@@ -380,8 +386,7 @@ test_concurrency() {
     >>"$dir/reader.out" 2>/dev/null
 
   # Count "msg-N" payloads across rendered output + archive — must equal sends.
-  local rendered archived
-  rendered=$(grep -c '^msg-' "$dir/reader.out" 2>/dev/null || echo 0)
+  local archived
   archived=$(wc -l < "$dir/.agents/inbox/rcvr.archive.jsonl" 2>/dev/null | tr -d ' ')
   local inbox_left=0
   if [[ -f "$dir/.agents/inbox/rcvr.jsonl" ]]; then
@@ -567,24 +572,32 @@ test_end_session() {
   # --keep-tmux must leave the live control plane intact.
   bash "$ORCHESTRATION_HOME/bin/end-session" --keep-tmux >/dev/null 2>&1
 
-  [[ -f "$dir/.agents/roster.json" ]] \
-    && pass "--keep-tmux preserves roster.json" \
-    || fail "--keep-tmux must not remove roster.json"
+  if [[ -f "$dir/.agents/roster.json" ]]; then
+    pass "--keep-tmux preserves roster.json"
+  else
+    fail "--keep-tmux must not remove roster.json"
+  fi
 
-  [[ -d "$dir/.agents/inbox" ]] \
-    && pass "--keep-tmux preserves inbox dir" \
-    || fail "--keep-tmux must not remove inbox dir"
+  if [[ -d "$dir/.agents/inbox" ]]; then
+    pass "--keep-tmux preserves inbox dir"
+  else
+    fail "--keep-tmux must not remove inbox dir"
+  fi
 
-  [[ -f "$dir/.agents/tasks.json" ]] \
-    && pass "--keep-tmux preserves tasks.json" \
-    || fail "--keep-tmux must not remove tasks.json"
+  if [[ -f "$dir/.agents/tasks.json" ]]; then
+    pass "--keep-tmux preserves tasks.json"
+  else
+    fail "--keep-tmux must not remove tasks.json"
+  fi
 
   # Archive snapshot must also exist.
   local archive
-  archive=$(ls -d "$dir/.agents/sessions"/*/  2>/dev/null | head -1)
-  [[ -n "$archive" && -f "${archive}roster.json" ]] \
-    && pass "--keep-tmux writes archive snapshot" \
-    || fail "--keep-tmux must write archive snapshot"
+  archive=$(find "$dir/.agents/sessions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+  if [[ -n "$archive" && -f "$archive/roster.json" ]]; then
+    pass "--keep-tmux writes archive snapshot"
+  else
+    fail "--keep-tmux must write archive snapshot"
+  fi
 
   rm -rf "$dir"
 }

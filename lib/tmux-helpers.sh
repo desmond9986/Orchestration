@@ -92,7 +92,8 @@ new_pane() {
 paste_to_pane() {
   local target="$1" file="$2"
   [[ -f "$file" ]] || die "prompt file missing: $file"
-  local buf="orch-$(date +%s%N)"
+  local buf
+  buf="orch-$(date +%s%N)"
   tmux load-buffer -b "$buf" "$file"
   tmux paste-buffer -b "$buf" -t "$target" -d
   tmux send-keys -t "$target" Enter

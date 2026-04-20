@@ -30,7 +30,6 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 require_cmd jq
 
-ROSTER_LIB="$(dirname "${BASH_SOURCE[0]}")/roster.sh"
 PROTOCOL_LIB="$(dirname "${BASH_SOURCE[0]}")/protocol.sh"
 
 tasks_file() { echo "$(agents_dir)/tasks.json"; }
@@ -308,6 +307,9 @@ cmd_list_available() {
       *) die "unknown flag: $1" ;;
     esac
   done
+  if [[ -n "$for_agent" ]]; then
+    : "$for_agent"
+  fi
   jq -r '
     (.tasks | map({key:.id, value:.status}) | from_entries) as $by
     | .tasks[]

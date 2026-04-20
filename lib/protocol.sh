@@ -275,7 +275,7 @@ deliver_notify() {
     sleep 0.1
   done
   # Ensure lockdir is cleaned up even if caller is interrupted (SIGINT/TERM).
-  trap "rm -rf '$lockdir'" INT TERM EXIT
+  trap 'rm -rf "$lockdir"' INT TERM EXIT
   # Clear any partially typed line so notify never submits stale input.
   tmux send-keys -t "$target" C-u 2>/dev/null || { rm -rf "$lockdir"; trap - INT TERM EXIT; return 1; }
   sleep 0.1
@@ -331,7 +331,8 @@ deliver_push() {
     printf "# ─── END (reply: orch-send %s \"...\" or via protocol.sh send) ───\n" "$from"
   } > "$tmpf"
 
-  local buf="orch-msg-$(date +%s%N)"
+  local buf
+  buf="orch-msg-$(date +%s%N)"
   tmux load-buffer -b "$buf" "$tmpf"
   tmux paste-buffer -b "$buf" -t "$target" -d 2>/dev/null || { rm -f "$tmpf"; return 1; }
   tmux send-keys -t "$target" C-m 2>/dev/null || true
