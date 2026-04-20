@@ -89,6 +89,51 @@ new_pane() {
 
 # Send a multi-line prompt to a pane reliably via paste-buffer.
 # Args: target prompt_file
+pane_hash() {
+  local target="$1"
+  tmux capture-pane -p -t "$target" 2>/dev/null | "${_PANE_HASH[@]}" | awk '{print $1}'
+}
+
+# Ensure Enter is delivered and observed by pane-state change.
+# Retries Enter when content appears unchanged (e.g. pasted draft not submitted).
+# Env knobs:
+#   ORCH_SUBMIT_ENTER_MAX      default 3 attempts
+#   ORCH_SUBMIT_ENTER_DELAY_MS default 300ms between attempts
+ensure_submit_enter() {
+  local target="$1"
+  local max="${2:-${ORCH_SUBMIT_ENTER_MAX:-3}}"
+  local delay_ms="${3:-${ORCH_SUBMIT_ENTER_DELAY_MS:-300}}"
+  [[ "$max" =~ ^[0-9]+$ ]] || max=3
+  [[ "$delay_ms" =~ ^[0-9]+$ ]] || delay_ms=300
+  local delay_s
+  delay_s=$(awk -v ms="$delay_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+
+  local before after i
+  before="$(pane_hash "$target")"
+  for (( i=1; i<=max; i++ )); do
+    tmux send-keys -t "$target" Enter
+    sleep "$delay_s"
+    after="$(pane_hash "$target")"
+    if [[ -n "$after" && "$after" != "$before" ]]; then
+      log_line "SUBMIT_ENTER ok target=$target attempts=$i"
+      return 0
+    fi
+  done
+  warn "submit enter did not observe pane change for $target after $max attempts"
+  log_line "SUBMIT_ENTER timeout target=$target attempts=$max"
+  return 1
+}
+
+# Send one message line and submit with retry.
+# Args: target message
+send_message_submit() {
+  local target="$1"; shift
+  tmux send-keys -t "$target" "$*"
+  ensure_submit_enter "$target"
+}
+
+# Send a multi-line prompt to a pane reliably via paste-buffer.
+# Args: target prompt_file
 paste_to_pane() {
   local target="$1" file="$2"
   [[ -f "$file" ]] || die "prompt file missing: $file"
@@ -96,7 +141,7 @@ paste_to_pane() {
   buf="orch-$(date +%s%N)"
   tmux load-buffer -b "$buf" "$file"
   tmux paste-buffer -b "$buf" -t "$target" -d
-  tmux send-keys -t "$target" Enter
+  ensure_submit_enter "$target" || true
 }
 
 # Send a single command line to a pane (with Enter).

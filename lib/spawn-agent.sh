@@ -237,21 +237,21 @@ case "$MODEL" in
     # Dismiss trust-folder dialog if present (new/untrusted directories).
     # Sending Enter selects "Yes, I trust this folder".
     if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q "trust this folder"; then
-      tmux send-keys -t "$TARGET" "" Enter
+      ensure_submit_enter "$TARGET" || true
     fi
     # Wait specifically for the ❯ input prompt to be visible.
     # wait_for_cli_ready can return on a transient stable state (blank screen
     # between trust dismissal and the actual chat UI appearing). Checking for
     # ❯ ensures we don't send the kick-off too early.
     if wait_for_input_prompt "$TARGET"; then
-      tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+      send_message_submit "$TARGET" "You are now active. Follow your Getting Started steps." || true
     else
       fallback="${ORCH_KICKOFF_FALLBACK_ENTER:-1}"
       if [[ "$fallback" == "1" ]]; then
         sleep 1
         warn "input prompt not visible for $ID — sending delayed kickoff fallback"
         log_line "KICKOFF_FALLBACK: id=$ID target=$TARGET reason=input_prompt_timeout"
-        tmux send-keys -t "$TARGET" "You are now active. Follow your Getting Started steps." Enter
+        send_message_submit "$TARGET" "You are now active. Follow your Getting Started steps." || true
       else
         warn "input prompt not visible for $ID — skipped kickoff Enter"
         log_line "KICKOFF_SKIPPED: id=$ID target=$TARGET reason=input_prompt_timeout"
@@ -262,11 +262,9 @@ case "$MODEL" in
     # codex / gemini: paste the full prompt file as the first message.
     wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID — pasting anyway"
     paste_to_pane "$TARGET" "$PROMPT_FILE"
-    # Codex occasionally leaves pasted content as draft input; one delayed
-    # extra Enter helps ensure submission without manual keypress.
+    # Optional additional submit burst for stubborn draft states.
     if [[ "${ORCH_PASTE_EXTRA_ENTER:-1}" == "1" ]]; then
-      sleep 0.5
-      tmux send-keys -t "$TARGET" Enter
+      ensure_submit_enter "$TARGET" "${ORCH_PASTE_EXTRA_ENTER_MAX:-2}" "${ORCH_PASTE_EXTRA_ENTER_DELAY_MS:-300}" || true
     fi
     ;;
 esac
