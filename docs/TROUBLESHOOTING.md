@@ -5,7 +5,7 @@
 ```bash
 orch-status --inbox <agent-id>
 orch-status --log
-orch-watch --pane-tail 12
+orch-status --follow
 ```
 
 If pane is at shell prompt, the CLI likely exited; restart CLI in that pane and resend pending instructions.

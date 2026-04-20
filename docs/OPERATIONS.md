@@ -53,7 +53,6 @@ orch-task complete t-schema architect --note "done"
 
 ```bash
 orch-status --follow
-orch-watch
 orch-enforce --on --interval 60
 ```
 

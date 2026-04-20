@@ -61,7 +61,7 @@ orchestrate lean
 Then in another terminal:
 
 ```bash
-orch-watch
+orch-status --follow
 ```
 
 Optional preflight before launching:
@@ -142,8 +142,6 @@ orchestrate --dangerously-skip-permissions <pattern>
 orch-status
 orch-status --follow
 orch-status --follow-status
-orch-watch
-orch-watch --pane-tail 10
 orch-enforce --on
 orch-enforce --status
 orch-enforce --off
