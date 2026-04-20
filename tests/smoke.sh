@@ -636,34 +636,6 @@ test_model_select() {
   assert_eq "unset" "$out" "pattern without AskModels: no exports"
 }
 
-# ── orch-doctor ──────────────────────────────────────────────────────────
-test_doctor() {
-  printf "\n\033[1morch-doctor\033[0m\n"
-  fresh_project; local dir="$ORCH_PROJECT"
-
-  # No active agents is degraded (not broken).
-  local out rc
-  rc=0
-  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" 2>&1) || rc=$?
-  assert_eq "10" "$rc" "doctor exits 10 for degraded sessions"
-  assert_contains "$out" "Overall: DEGRADED" "doctor prints DEGRADED overall"
-
-  # JSON mode should mirror overall status.
-  rc=0
-  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" --json 2>/dev/null) || rc=$?
-  assert_eq "10" "$rc" "doctor --json preserves degraded exit code"
-  assert_eq "DEGRADED" "$(jq -r '.overall' <<<"$out")" "doctor --json exposes overall"
-
-  # Active agent with unreachable pane should be broken.
-  bash "$ORCHESTRATION_HOME/lib/roster.sh" add broken coder codex "no-such-session-$$:99.99" >/dev/null
-  rc=0
-  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-doctor" 2>&1) || rc=$?
-  assert_eq "20" "$rc" "doctor exits 20 for broken sessions"
-  assert_contains "$out" "tmux target unreachable" "doctor reports unreachable tmux target"
-
-  rm -rf "$dir"
-}
-
 # ── orch-enforce ─────────────────────────────────────────────────────────
 test_enforce() {
   printf "\n\033[1morch-enforce\033[0m\n"
@@ -755,11 +727,10 @@ case "$SUITE" in
   concurrency)  test_concurrency ;;
   end-session)  test_end_session ;;
   model-select) test_model_select ;;
-  doctor)       test_doctor ;;
   enforce)      test_enforce ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_doctor; test_enforce; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

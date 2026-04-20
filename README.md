@@ -83,13 +83,38 @@ Planned improvements:
   single-worktree behavior for solo-coder sessions.
 
 - **Better onboarding**  
-  Expand `orch-doctor` with deeper remediation playbooks, add `orch tutorial`,
-  and context-aware help text that suggests the next command based on session
-  state.
+  Add `orch tutorial` and context-aware help text that suggests the next
+  command based on session state.
 
 - **Desktop/web control plane (optional)**  
   After TUI stabilizes, expose the same control surface in a lightweight local
   GUI for users who prefer point-and-click operations.
+
+## Reliability Improvements (Echo / No-Reply / No-Work)
+
+These are the concrete improvements planned/implemented to prevent the
+"agent reads inbox, echoes, then does nothing" failure mode.
+
+Implemented now:
+- `orch-enforce` loop with per-agent inbox nudges and SLA signals.
+- Schema-gated messaging when enforce is enabled:
+  - `TASK` requires `objective`, `definition_of_done`, `required_reply`
+  - `DONE` requires `commit_hash`, `changed_files`, `test_result`
+- Task-unblock notifications changed from broadcast `STATUS` spam to
+  targeted, throttled `INFO` notifications (orchestrator + coders only).
+- `orch-watch` redesigned to show actionable signals (`WAITING_INBOX`,
+  `STATUS_LOOP_RISK`, `BLOCKED_REPORTED`, `DONE_REPORTED`, `UNREACHABLE`)
+  instead of only pane tails.
+
+Next improvements to close remaining gaps:
+- Per-task lifecycle tracking (`TASK -> ACK/IN_PROGRESS -> DONE/BLOCKED`) by
+  task/message id, not coarse line-window signals.
+- Non-destructive nudge mode (no forced `C-u`/Enter by default) with idle
+  detection before pane injection.
+- Event-offset based loop detection to avoid repeated alerts on old history.
+- State pruning for long sessions (`enforce.state.json`, `tasks.notify.json`).
+- Optional hard block mode for orchestrator `STATUS` spam when no actionable
+  `TASK` exists.
 
 ## Patterns
 
@@ -388,33 +413,19 @@ orch-status --status                # summary status board
 orch-status --roster                # just the roster
 orch-status --inbox <id>            # peek an agent's unread inbox
 orch-status --log                   # delivery errors / retries
-orch-doctor                         # health check (HEALTHY/DEGRADED/BROKEN)
-orch-doctor --json                  # machine-readable health report
 orch-enforce --on                   # start active inbox/target enforcement loop
 orch-enforce --status               # check enforce loop state
 orch-enforce --off                  # stop enforcement loop
 
-orch-watch                          # live dashboard (refresh every 2s)
-orch-watch 3 10                     # refresh every 3s, show 10 lines per pane
+orch-watch                          # actionable live signals dashboard
+orch-watch 3                        # refresh every 3s
+orch-watch --pane-tail 10           # include pane tails (debug mode)
 ```
 
 **Tip:** open three terminals —
 1. The orchestration tmux session itself
 2. `orch-watch` to see if anyone is stuck
 3. `orch-status --follow` to follow the message stream
-
-Health checks:
-
-```bash
-orch-doctor
-# Exit 0  = HEALTHY
-# Exit 10 = DEGRADED (warnings)
-# Exit 20 = BROKEN   (requires intervention)
-```
-
-`orch-doctor` validates roster integrity, tmux reachability, pane metadata
-(`@orch_agent_id`), messaging failure signals (`NOTIFY_FAIL`, `ACK_TIMEOUT`,
-`RETARGET_FAIL`), and lightweight status-vs-git evidence drift checks.
 
 Fast enforcement loop (optional):
 
@@ -445,8 +456,8 @@ orch-task create "Write tests"        --depends t-schema
 orch-task list-available              # only shows tasks whose deps are done
 orch-task claim t-schema architect    # atomic — only one agent wins
 orch-task complete t-schema architect --note "schema.md committed"
-# → any task whose deps just cleared (t-codec, t-tests here) is announced
-#   via STATUS broadcast so a free worker can claim it next
+# → any task whose deps just cleared is announced via targeted INFO
+#   to active orchestrator/coder agents (throttled)
 
 # If you hit a blocker, flag it — blocked tasks are hidden from
 # list-available and can't be re-claimed until explicitly reopened:
@@ -636,9 +647,9 @@ shared across projects while each project has its own isolated session.
 
 ### Three observability layers, not one
 `bus.md` (every message, full payload), `status.md` (one-line events), and
-`orch-watch` (live pane tails) each answer a different question: "what was
-said?", "where are we?", "is anyone stuck?". None of them subsumes the
-others in practice.
+`orch-watch` (actionable live signals; optional pane tails) each answer a
+different question: "what was said?", "where are we?", "is anyone stuck?".
+None of them subsumes the others in practice.
 
 ## Comprehensive guide
 
@@ -696,7 +707,7 @@ orch-send --broadcast "Reminder: keep functions under 80 lines"
 
 ```bash
 # Three terminals is the ideal setup:
-orch-watch                  # live pane tails — who is stuck?
+orch-watch                  # actionable agent signals — who is stuck?
 orch-status --follow        # message stream — what is being said?
 orch-status --follow-status # event digest — completed, blocked, assigned?
 ```
@@ -878,7 +889,7 @@ The `--parent` flag sets a supervisory relationship recorded in the roster
 ```bash
 orch-status --inbox <id>    # any unread messages?
 orch-status --log           # any delivery failures?
-orch-watch                  # what is the pane actually doing?
+orch-watch --pane-tail 10   # what is the pane actually doing?
 ```
 
 If the pane is at a shell prompt, the agent's CLI exited. Reattach
