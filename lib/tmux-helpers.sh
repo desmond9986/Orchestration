@@ -94,6 +94,12 @@ pane_hash() {
   tmux capture-pane -p -t "$target" 2>/dev/null | "${_PANE_HASH[@]}" | awk '{print $1}'
 }
 
+# Single submit key path (CR) used consistently across helpers.
+send_submit_key() {
+  local target="$1"
+  tmux send-keys -t "$target" C-m
+}
+
 # Ensure Enter is delivered and observed by pane-state change.
 # Retries Enter when content appears unchanged (e.g. pasted draft not submitted).
 # Env knobs:
@@ -111,7 +117,7 @@ ensure_submit_enter() {
   local before after i
   before="$(pane_hash "$target")"
   for (( i=1; i<=max; i++ )); do
-    tmux send-keys -t "$target" Enter
+    send_submit_key "$target"
     sleep "$delay_s"
     after="$(pane_hash "$target")"
     if [[ -n "$after" && "$after" != "$before" ]]; then
@@ -128,7 +134,10 @@ ensure_submit_enter() {
 # Currently tuned for Codex's visible "[Pasted Content ...]" marker.
 has_pending_pasted_draft() {
   local target="$1"
-  tmux capture-pane -p -t "$target" 2>/dev/null | tail -n 30 | grep -q "\[Pasted Content"
+  # Match active input line style: "> ... [Pasted Content N chars]"
+  # We intentionally only inspect recent lines to avoid historical matches.
+  tmux capture-pane -p -t "$target" 2>/dev/null | tail -n 8 \
+    | grep -qE '^> .*\[Pasted Content [0-9]+ chars\]'
 }
 
 # Try to submit pasted draft until UI marker disappears.
@@ -146,7 +155,7 @@ submit_until_draft_clears() {
       log_line "DRAFT_CLEAR ok target=$target attempts=$i"
       return 0
     fi
-    tmux send-keys -t "$target" Enter
+    send_submit_key "$target"
     sleep "$delay_s"
   done
   warn "pasted draft marker still visible for $target after $max attempts"

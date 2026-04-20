@@ -255,9 +255,16 @@ case "$MODEL" in
     # Wait for startup rendering to settle.
     wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID"
     # Dismiss trust-folder dialog if present (new/untrusted directories).
-    # Sending Enter selects "Yes, I trust this folder".
+    # Submit key selects "Yes, I trust this folder".
     if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q "trust this folder"; then
       ensure_submit_enter "$TARGET" || true
+    fi
+    # Claude usage-limit gate: acknowledge option 1 so pane is not left hanging
+    # at the modal forever. This does not bypass limits; it just clears prompt UI.
+    if tmux capture-pane -p -t "$TARGET" 2>/dev/null | grep -q "Stop and wait for limit to reset"; then
+      tmux send-keys -t "$TARGET" "1"
+      ensure_submit_enter "$TARGET" || true
+      log_line "CLAUDE_LIMIT_GATE: id=$ID target=$TARGET action=select_wait"
     fi
     # Wait specifically for the ❯ input prompt to be visible.
     # wait_for_cli_ready can return on a transient stable state (blank screen
@@ -285,6 +292,7 @@ case "$MODEL" in
     # Optional additional submit burst for stubborn draft states.
     if [[ "${ORCH_PASTE_EXTRA_ENTER:-1}" == "1" ]]; then
       ensure_submit_enter "$TARGET" "${ORCH_PASTE_EXTRA_ENTER_MAX:-2}" "${ORCH_PASTE_EXTRA_ENTER_DELAY_MS:-300}" || true
+      submit_until_draft_clears "$TARGET" "${ORCH_PASTE_EXTRA_DRAFT_MAX:-8}" "${ORCH_PASTE_EXTRA_DRAFT_DELAY_MS:-350}" || true
     fi
     ;;
 esac
