@@ -4,9 +4,8 @@
 
 Please report security issues privately by emailing:
 
-- desmond@example.com
+- desmond.tan986@gmail.com
 
-(Replace with your preferred security contact email.)
 
 Include:
 
