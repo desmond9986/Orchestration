@@ -82,20 +82,39 @@ status_line() {
 # Spins up to 10s before giving up. Stale locks older than 60s are reaped so a
 # crashed process cannot wedge the mutex forever.
 with_file_lock() {
+  _mtime_epoch() {
+    local p="$1" m=""
+    m=$(stat -c %Y "$p" 2>/dev/null || true)
+    if [[ "$m" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$m"
+      return 0
+    fi
+    m=$(stat -f %m "$p" 2>/dev/null || true)
+    if [[ "$m" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$m"
+      return 0
+    fi
+    date +%s
+  }
+
   local lock="$1"; shift
   local waited=0
+  local max_wait_loops="${ORCH_LOCK_MAX_WAIT_LOOPS:-300}"  # 30s at 100ms
+  local stale_sec="${ORCH_LOCK_STALE_SEC:-60}"
+  [[ "$max_wait_loops" =~ ^[0-9]+$ ]] || max_wait_loops=300
+  [[ "$stale_sec" =~ ^[0-9]+$ ]] || stale_sec=60
   while ! mkdir "$lock" 2>/dev/null; do
     if [[ -d "$lock" ]]; then
       local age
-      age=$(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || date +%s) ))
-      if (( age > 60 )); then
+      age=$(( $(date +%s) - $(_mtime_epoch "$lock") ))
+      if (( age > stale_sec )); then
         rmdir "$lock" 2>/dev/null || true
         continue
       fi
     fi
     sleep 0.1
     waited=$((waited + 1))
-    (( waited > 100 )) && die "could not acquire lock at $lock after 10s"
+    (( waited > max_wait_loops )) && die "could not acquire lock at $lock after $((max_wait_loops/10))s"
   done
   # The wrapped command may call `die` (→ exit) or fail under `set -e`. Either
   # path skips the normal rmdir below, so register an EXIT trap to guarantee

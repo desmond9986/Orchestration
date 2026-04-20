@@ -260,7 +260,13 @@ deliver_notify() {
     # crashed or was killed between mkdir and cleanup. Forcibly remove it.
     if [[ -d "$lockdir" ]]; then
       local age
-      age=$(( $(date +%s) - $(stat -f %m "$lockdir" 2>/dev/null || stat -c %Y "$lockdir" 2>/dev/null || date +%s) ))
+      local mtime
+      mtime=$(stat -c %Y "$lockdir" 2>/dev/null || true)
+      if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+        mtime=$(stat -f %m "$lockdir" 2>/dev/null || true)
+      fi
+      [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=$(date +%s)
+      age=$(( $(date +%s) - mtime ))
       if (( age > 5 )); then
         warn "removing stale notify lock for $target (age ${age}s)"
         rm -rf "$lockdir"
