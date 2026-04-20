@@ -1,5 +1,13 @@
 # Troubleshooting
 
+## Known behavior to expect
+
+- Agents can sometimes respond with protocol echoes instead of actionable execution when instructions are vague.
+- Notify delivery can appear intermittent if tmux target metadata is stale.
+- High parallel churn can expose lock wait/retry behavior.
+
+If this impacts throughput, use stricter `TASK` payloads and run `orch-enforce --on` during active sessions.
+
 ## Agent not responding
 
 ```bash

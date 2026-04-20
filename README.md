@@ -13,6 +13,8 @@ Use prebuilt patterns (or define your own), assign different CLIs per role, and 
 - [Daily Commands](#daily-commands)
 - [Safety Defaults](#safety-defaults)
 - [Observability](#observability)
+- [Known Issues](#known-issues)
+- [Future Features](#future-features)
 - [Documentation Map](#documentation-map)
 - [Project Status](#project-status)
 - [Contributing](#contributing)
@@ -146,6 +148,25 @@ orch-enforce --on
 orch-enforce --status
 orch-enforce --off
 ```
+
+## Known Issues
+
+Current known operational gaps:
+- Agent compliance drift: some agents may repeatedly echo/check-inbox without executing work unless task prompts are explicit and enforced.
+- Tmux delivery edge cases: pane notify can fail when target pane metadata is stale or shell/CLI state changes mid-send.
+- Long-session state growth: runtime artifacts under `.agents/` may accumulate and need periodic cleanup in long-lived sessions.
+- Operator UX friction: many commands/flags increase chance of orchestration mistakes.
+
+Use [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for immediate workarounds and [docs/ROADMAP.md](docs/ROADMAP.md) for planned fixes.
+
+## Future Features
+
+Priority improvements planned:
+- Guided control plane (`orch ui`) to reduce command memorization.
+- Optional per-coder git worktrees for multi-coder sessions.
+- Stronger enforcement lifecycle (`TASK -> ACK/IN_PROGRESS -> DONE/BLOCKED`) with better anti-loop detection.
+- Lower-noise automation (smarter nudges, clearer intervention prompts).
+- Better session hygiene tooling for pruning/archive management.
 
 ## Documentation Map
 
