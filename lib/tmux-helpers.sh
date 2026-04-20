@@ -124,6 +124,36 @@ ensure_submit_enter() {
   return 1
 }
 
+# Best-effort detector for unsent pasted drafts in CLI UIs.
+# Currently tuned for Codex's visible "[Pasted Content ...]" marker.
+has_pending_pasted_draft() {
+  local target="$1"
+  tmux capture-pane -p -t "$target" 2>/dev/null | tail -n 30 | grep -q "\[Pasted Content"
+}
+
+# Try to submit pasted draft until UI marker disappears.
+submit_until_draft_clears() {
+  local target="$1"
+  local max="${2:-${ORCH_SUBMIT_DRAFT_CLEAR_MAX:-6}}"
+  local delay_ms="${3:-${ORCH_SUBMIT_DRAFT_CLEAR_DELAY_MS:-350}}"
+  [[ "$max" =~ ^[0-9]+$ ]] || max=6
+  [[ "$delay_ms" =~ ^[0-9]+$ ]] || delay_ms=350
+  local delay_s
+  delay_s=$(awk -v ms="$delay_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+  local i
+  for (( i=1; i<=max; i++ )); do
+    if ! has_pending_pasted_draft "$target"; then
+      log_line "DRAFT_CLEAR ok target=$target attempts=$i"
+      return 0
+    fi
+    tmux send-keys -t "$target" Enter
+    sleep "$delay_s"
+  done
+  warn "pasted draft marker still visible for $target after $max attempts"
+  log_line "DRAFT_CLEAR timeout target=$target attempts=$max"
+  return 1
+}
+
 # Send one message line and submit with retry.
 # Args: target message
 send_message_submit() {
@@ -142,6 +172,7 @@ paste_to_pane() {
   tmux load-buffer -b "$buf" "$file"
   tmux paste-buffer -b "$buf" -t "$target" -d
   ensure_submit_enter "$target" || true
+  submit_until_draft_clears "$target" || true
 }
 
 # Send a single command line to a pane (with Enter).
@@ -261,8 +292,12 @@ wait_for_input_prompt() {
 attach_session() {
   local session="$1"
   if [[ -n "${TMUX:-}" ]]; then
-    info "already inside tmux — switch with: tmux switch-client -t '$session'"
-    info "or press Ctrl-B, S to pick a session"
+    if [[ "${ORCH_AUTO_SWITCH_IN_TMUX:-1}" == "1" ]]; then
+      tmux switch-client -t "$session" 2>/dev/null || true
+    else
+      info "already inside tmux — switch with: tmux switch-client -t '$session'"
+      info "or press Ctrl-B, S to pick a session"
+    fi
   else
     tmux attach-session -t "$session"
   fi

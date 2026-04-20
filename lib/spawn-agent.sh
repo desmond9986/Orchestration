@@ -126,13 +126,28 @@ TARGET=""
 CREATED_NEW_PANE=0
 
 _allocate_target_and_register() {
+  _is_shell_pane() {
+    local t="$1"
+    local cmd
+    cmd=$(tmux display-message -p -t "$t" '#{pane_current_command}' 2>/dev/null || echo "")
+    case "$cmd" in
+      bash|zsh|sh|fish|dash|ksh) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
   if bash "$ROSTER_LIB" exists "$ID" >/dev/null 2>&1; then
     die "agent already exists: $ID"
   fi
   if (( total <= 4 )); then
     active_count=$(jq '[.agents[] | select(.status=="active")] | length' "$(roster_file)")
     if (( active_count == 0 )); then
-      TARGET="$SESSION:0.0"
+      if _is_shell_pane "$SESSION:0.0"; then
+        TARGET="$SESSION:0.0"
+      else
+        TARGET=$(new_pane "$SESSION" 0)
+        CREATED_NEW_PANE=1
+      fi
     else
       TARGET=$(new_pane "$SESSION" 0)
       CREATED_NEW_PANE=1
@@ -158,7 +173,12 @@ _allocate_target_and_register() {
           TARGET=$(new_pane "$SESSION" "$WIN")
           CREATED_NEW_PANE=1
         else
-          TARGET="$SESSION:$WIN.0"
+          if _is_shell_pane "$SESSION:$WIN.0"; then
+            TARGET="$SESSION:$WIN.0"
+          else
+            TARGET=$(new_pane "$SESSION" "$WIN")
+            CREATED_NEW_PANE=1
+          fi
         fi
       else
         TARGET=$(new_pane "$SESSION" "$WIN")
