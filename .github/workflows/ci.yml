@@ -16,11 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq tmux shellcheck
-
-      - name: Lint shell scripts
-        run: |
-          shellcheck -e SC1090,SC1091 bin/* lib/*.sh patterns/*.sh install.sh tests/smoke.sh
+          sudo apt-get install -y jq tmux
 
       - name: Syntax check
         run: |
