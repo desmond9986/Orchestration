@@ -458,6 +458,31 @@ test_spawn_layout() {
   assert_contains "$orch_target" ":0." "split layout: orchestrator lands in window 0"
   assert_contains "$arch_target" ":1." "split layout: non-orchestrator lands in window 1"
 
+  # If the base orchestrator pane is already occupied by a non-shell process,
+  # spawn must allocate a fresh pane instead of typing launch commands into it.
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  ORCH_PROJECT=$(mktemp -d)
+  export ORCH_PROJECT
+  tmux new-session -d -s "$sess" -c "$ORCH_PROJECT" -x 220 -y 50
+  tmux send-keys -t "$sess:0.0" "clear && tail -f /dev/null" Enter
+  local tries=0
+  while (( tries < 30 )); do
+    if [[ "$(tmux display-message -p -t "$sess:0.0" '#{pane_current_command}' 2>/dev/null)" == "tail" ]]; then
+      break
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init "$sess" >/dev/null
+  export ORCH_TOTAL_AGENTS=6
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" orchestrator orchestrator none --session "$sess"
+  orch_target=$(jq -r '.agents[] | select(.id=="orchestrator") | .target' "$(roster_file)")
+  if [[ "$orch_target" != "$sess:0.0" ]]; then
+    pass "split layout: orchestrator avoids reusing non-shell pane 0.0"
+  else
+    fail "split layout: orchestrator must not reuse non-shell pane 0.0"
+  fi
+
   unset ORCH_TOTAL_AGENTS
   rm -rf "$ORCH_PROJECT"
   tmux kill-session -t "$sess" 2>/dev/null || true
@@ -501,6 +526,57 @@ test_spawn_layout() {
   rm -rf "$proj_a" "$proj_b"
 
   cleanup_layout
+}
+
+test_present_session() {
+  printf "\n\033[1mpresent session\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  set +e
+  source "$ORCHESTRATION_HOME/lib/common.sh"
+  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+  set +e
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-present-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_present() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  local proj
+  proj=$(mktemp -d)
+  export ORCH_PROJECT="$proj"
+  tmux new-session -d -s alpha -c "$proj"
+  tmux new-session -d -s beta  -c "$proj"
+
+  local rc out
+  rc=0
+  out=$(TMUX=1 bash -c '
+    export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
+    export ORCH_PROJECT="'"$proj"'"
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    present_session beta
+  ' 2>&1) || rc=$?
+  assert_eq "0" "$rc" "present_session inside tmux exits cleanly"
+  assert_contains "$out" "switch with: tmux switch-client -t 'beta'" \
+    "present_session inside tmux prints manual switch guidance by default"
+
+  tmux kill-session -t alpha 2>/dev/null || true
+  tmux kill-session -t beta 2>/dev/null || true
+  rm -rf "$proj"
+  cleanup_present
 }
 
 # ── tmux readiness poll ──────────────────────────────────────────────────
@@ -764,9 +840,10 @@ case "$SUITE" in
   model-select) test_model_select ;;
   enforce)      test_enforce ;;
   preflight)    test_preflight ;;
+  present-session) test_present_session ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_present_session; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

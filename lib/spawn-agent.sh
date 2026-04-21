@@ -154,7 +154,12 @@ _allocate_target_and_register() {
     fi
   else
     if [[ "$ROLE" == "orchestrator" ]]; then
-      TARGET="$SESSION:0.0"
+      if _is_shell_pane "$SESSION:0.0"; then
+        TARGET="$SESSION:0.0"
+      else
+        TARGET=$(new_pane "$SESSION" 0)
+        CREATED_NEW_PANE=1
+      fi
     else
       ensure_window "$SESSION" 1
       pane_count_1=$(tmux list-panes -t "$SESSION:1" 2>/dev/null | wc -l | tr -d ' ')
