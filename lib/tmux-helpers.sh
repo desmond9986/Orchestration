@@ -171,6 +171,36 @@ send_message_submit() {
   ensure_submit_enter "$target"
 }
 
+pane_contains_text() {
+  local target="$1" needle="$2"
+  tmux capture-pane -p -t "$target" 2>/dev/null | grep -Fq "$needle"
+}
+
+# Send a visible bootstrap/audit message and verify it appeared in the pane.
+# This gives operators a consistent visible confirmation across model CLIs.
+send_bootstrap_message() {
+  local target="$1" message="$2"
+  local max="${3:-${ORCH_BOOTSTRAP_MAX_ATTEMPTS:-4}}"
+  local delay_ms="${4:-${ORCH_BOOTSTRAP_DELAY_MS:-350}}"
+  [[ "$max" =~ ^[0-9]+$ ]] || max=4
+  [[ "$delay_ms" =~ ^[0-9]+$ ]] || delay_ms=350
+  local delay_s
+  delay_s=$(awk -v ms="$delay_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+  local i
+  for (( i=1; i<=max; i++ )); do
+    tmux send-keys -t "$target" "$message"
+    ensure_submit_enter "$target" || true
+    sleep "$delay_s"
+    if pane_contains_text "$target" "$message"; then
+      log_line "BOOTSTRAP ok target=$target attempts=$i"
+      return 0
+    fi
+  done
+  warn "bootstrap message not confirmed in pane for $target after $max attempts"
+  log_line "BOOTSTRAP timeout target=$target attempts=$max"
+  return 1
+}
+
 # Send a multi-line prompt to a pane reliably via paste-buffer.
 # Args: target prompt_file
 paste_to_pane() {
@@ -296,18 +326,24 @@ wait_for_input_prompt() {
   return 1
 }
 
-# Attach to a session from outside tmux. If already inside tmux, print
-# instructions instead — switching client hijacks the user's current view.
-attach_session() {
+# Present a session to the user without destructively hijacking an existing tmux
+# client. Outside tmux this may attach; inside tmux it prints how to switch.
+present_session() {
   local session="$1"
   if [[ -n "${TMUX:-}" ]]; then
-    if [[ "${ORCH_AUTO_SWITCH_IN_TMUX:-1}" == "1" ]]; then
+    if [[ "${ORCH_AUTO_SWITCH_IN_TMUX:-0}" == "1" ]]; then
       tmux switch-client -t "$session" 2>/dev/null || true
     else
+      info "session '$session' ready"
       info "already inside tmux — switch with: tmux switch-client -t '$session'"
       info "or press Ctrl-B, S to pick a session"
     fi
   else
-    tmux attach-session -t "$session"
+    if [[ "${ORCH_AUTO_ATTACH_OUTSIDE_TMUX:-1}" == "1" ]]; then
+      tmux attach-session -t "$session"
+    else
+      info "session '$session' ready"
+      info "attach with: tmux attach-session -t '$session'"
+    fi
   fi
 }

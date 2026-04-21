@@ -179,12 +179,11 @@ fi
 info "starting pattern '$PATTERN' in $PWD"
 bash "$PATTERN_FILE" "$@"
 
-# After the pattern has spawned everyone, print how to view the session.
-# Do NOT auto-switch — if the user is already inside tmux, switching client
-# would make their existing panes disappear from view.
+# After the pattern has spawned everyone, present how to view the session.
+# Inside tmux this should be non-destructive by default.
 SESSION=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" session 2>/dev/null || echo "")
 if [[ -n "$SESSION" ]]; then
   ok "session '$SESSION' ready"
   source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
-  attach_session "$SESSION"
+  present_session "$SESSION"
 fi

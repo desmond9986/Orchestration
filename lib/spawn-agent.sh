@@ -240,6 +240,7 @@ launch_cli_cmd() {
 }
 
 LAUNCH_CMD=$(launch_cli_cmd "$MODEL")
+BOOTSTRAP_TOKEN="BOOTSTRAP agent=$ID context_file=$PROMPT_FILE"
 
 # Banner + CLI launch
 send_line "$TARGET" "clear"
@@ -271,14 +272,14 @@ case "$MODEL" in
     # between trust dismissal and the actual chat UI appearing). Checking for
     # ❯ ensures we don't send the kick-off too early.
     if wait_for_input_prompt "$TARGET"; then
-      send_message_submit "$TARGET" "You are now active. Follow your Getting Started steps." || true
+      send_bootstrap_message "$TARGET" "$BOOTSTRAP_TOKEN loaded. Read it now and follow your Getting Started steps." || true
     else
       fallback="${ORCH_KICKOFF_FALLBACK_ENTER:-1}"
       if [[ "$fallback" == "1" ]]; then
         sleep 1
         warn "input prompt not visible for $ID — sending delayed kickoff fallback"
         log_line "KICKOFF_FALLBACK: id=$ID target=$TARGET reason=input_prompt_timeout"
-        send_message_submit "$TARGET" "You are now active. Follow your Getting Started steps." || true
+        send_bootstrap_message "$TARGET" "$BOOTSTRAP_TOKEN loaded. Read it now and follow your Getting Started steps." || true
       else
         warn "input prompt not visible for $ID — skipped kickoff Enter"
         log_line "KICKOFF_SKIPPED: id=$ID target=$TARGET reason=input_prompt_timeout"
@@ -294,6 +295,7 @@ case "$MODEL" in
       ensure_submit_enter "$TARGET" "${ORCH_PASTE_EXTRA_ENTER_MAX:-2}" "${ORCH_PASTE_EXTRA_ENTER_DELAY_MS:-300}" || true
       submit_until_draft_clears "$TARGET" "${ORCH_PASTE_EXTRA_DRAFT_MAX:-8}" "${ORCH_PASTE_EXTRA_DRAFT_DELAY_MS:-350}" || true
     fi
+    send_bootstrap_message "$TARGET" "$BOOTSTRAP_TOKEN loaded. Follow your Getting Started steps." || true
     ;;
 esac
 
