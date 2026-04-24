@@ -104,6 +104,7 @@ orchestrate list
 ```bash
 # Session
 orchestrate <pattern>
+orchestrate --switch-client <pattern>
 add-agent <role> <model> [--id <agent-id>] [--hats <h1,h2>]
 remove-agent <agent-id>
 end-session [--keep-tmux]
@@ -148,6 +149,8 @@ orch-enforce --on
 orch-enforce --status
 orch-enforce --off
 ```
+
+When launching from inside tmux, `orchestrate` does not switch your current client by default. Use `--switch-client` when you want the new orchestration session to take over the current tmux view.
 
 ## Known Issues
 

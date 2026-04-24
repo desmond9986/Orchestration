@@ -27,7 +27,10 @@ orch-preflight
 
 ```bash
 orchestrate lean
+orchestrate --switch-client lean
 ```
+
+Use `--switch-client` only when launching from a tmux pane and you want the current tmux client to move to the new orchestration session. Without it, the launcher prints the switch command so existing tmux/iTerm views are not replaced unexpectedly.
 
 ## 3) Coordinate
 

@@ -135,7 +135,9 @@ ensure_submit_enter() {
       return 0
     fi
   done
-  warn "submit enter did not observe pane change for $target after $max attempts"
+  if [[ "${ORCH_SUBMIT_WARN_ON_TIMEOUT:-0}" == "1" ]]; then
+    warn "submit enter did not observe pane change for $target after $max attempts"
+  fi
   log_line "SUBMIT_ENTER timeout target=$target attempts=$max"
   return 1
 }
@@ -218,7 +220,9 @@ send_bootstrap_message() {
       return 0
     fi
   done
-  warn "bootstrap message not confirmed in pane for $target after $max attempts"
+  if [[ "${ORCH_BOOTSTRAP_STRICT:-0}" == "1" ]]; then
+    warn "bootstrap message not confirmed in pane for $target after $max attempts"
+  fi
   log_line "BOOTSTRAP timeout target=$target attempts=$max"
   return 1
 }
