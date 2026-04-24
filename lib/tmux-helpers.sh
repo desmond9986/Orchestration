@@ -94,6 +94,16 @@ pane_hash() {
   tmux capture-pane -p -t "$target" 2>/dev/null | "${_PANE_HASH[@]}" | awk '{print $1}'
 }
 
+is_shell_pane() {
+  local target="$1"
+  local cmd
+  cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null || echo "")
+  case "$cmd" in
+    bash|zsh|sh|fish|dash|ksh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Single submit key path (CR) used consistently across helpers.
 send_submit_key() {
   local target="$1"
@@ -165,9 +175,21 @@ submit_until_draft_clears() {
 
 # Send one message line and submit with retry.
 # Args: target message
+paste_text_to_pane() {
+  local target="$1"; shift
+  local text="$*"
+  local tmpf buf
+  tmpf=$(mktemp)
+  buf="orch-text-$(date +%s%N)"
+  printf "%s" "$text" > "$tmpf"
+  tmux load-buffer -b "$buf" "$tmpf"
+  tmux paste-buffer -b "$buf" -t "$target" -d
+  rm -f "$tmpf"
+}
+
 send_message_submit() {
   local target="$1"; shift
-  tmux send-keys -t "$target" "$*"
+  paste_text_to_pane "$target" "$*"
   ensure_submit_enter "$target"
 }
 
@@ -188,7 +210,7 @@ send_bootstrap_message() {
   delay_s=$(awk -v ms="$delay_ms" 'BEGIN { printf "%.3f", ms/1000 }')
   local i
   for (( i=1; i<=max; i++ )); do
-    tmux send-keys -t "$target" "$message"
+    paste_text_to_pane "$target" "$message"
     ensure_submit_enter "$target" || true
     sleep "$delay_s"
     if pane_contains_text "$target" "$message"; then
@@ -217,7 +239,8 @@ paste_to_pane() {
 # Send a single command line to a pane (with Enter).
 send_line() {
   local target="$1"; shift
-  tmux send-keys -t "$target" "$*" Enter
+  paste_text_to_pane "$target" "$*"
+  ensure_submit_enter "$target" || true
 }
 
 # Set the title of a pane to its agent id (helps human navigate).
