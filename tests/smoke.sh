@@ -573,10 +573,114 @@ test_present_session() {
   assert_contains "$out" "switch with: tmux switch-client -t 'beta'" \
     "present_session inside tmux prints manual switch guidance by default"
 
+  rc=0
+  out=$(bash -c '
+    export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
+    export ORCH_PROJECT="'"$proj"'"
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    present_session beta
+  ' 2>&1) || rc=$?
+  assert_eq "0" "$rc" "present_session outside tmux exits cleanly by default"
+  assert_contains "$out" "attach with: tmux attach-session -t 'beta'" \
+    "present_session outside tmux prints attach guidance by default"
+
   tmux kill-session -t alpha 2>/dev/null || true
   tmux kill-session -t beta 2>/dev/null || true
   rm -rf "$proj"
   cleanup_present
+}
+
+test_pattern_defaults() {
+  printf "\n\033[1mpattern defaults\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-patterns-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_patterns() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  local proj hats
+  proj=$(mktemp -d)
+  ORCH_PROJECT="$proj" ORCH_MODEL_coder=none bash "$ORCHESTRATION_HOME/patterns/lonely-coder.sh" >/dev/null
+  hats=$(jq -r '.agents[] | select(.id=="coder-1") | .hats | join(",")' "$proj/.agents/roster.json")
+  assert_eq "qa,reviewer" "$hats" "lonely-coder does not include spawner hat by default"
+  tmux kill-session -t lonely-coder 2>/dev/null || true
+  rm -rf "$proj"
+
+  proj=$(mktemp -d)
+  ORCH_PROJECT="$proj" ORCH_MODEL_orchestrator=none ORCH_MODEL_coder=none \
+    bash "$ORCHESTRATION_HOME/patterns/lean.sh" >/dev/null
+  hats=$(jq -r '.agents[] | select(.id=="coder-1") | .hats | join(",")' "$proj/.agents/roster.json")
+  assert_eq "" "$hats" "lean coder-1 does not include spawner hat by default"
+  tmux kill-session -t lean 2>/dev/null || true
+  rm -rf "$proj"
+
+  proj=$(mktemp -d)
+  ORCH_PROJECT="$proj" ORCH_ENABLE_SPAWNER_HATS=1 ORCH_MODEL_orchestrator=none ORCH_MODEL_coder=none \
+    bash "$ORCHESTRATION_HOME/patterns/lean.sh" >/dev/null
+  hats=$(jq -r '.agents[] | select(.id=="coder-1") | .hats | join(",")' "$proj/.agents/roster.json")
+  assert_eq "spawner" "$hats" "lean coder-1 includes spawner hat when explicitly enabled"
+  tmux kill-session -t lean 2>/dev/null || true
+  rm -rf "$proj"
+
+  cleanup_patterns
+}
+
+test_tmux_send_helpers() {
+  printf "\n\033[1mtmux send helpers\033[0m\n"
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local sock="orch-send-$$"
+  local sess="send-test"
+  set +e
+  source "$ORCHESTRATION_HOME/lib/common.sh"
+  source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+  set +e
+
+  tmux() { command tmux -L "$sock" "$@"; }
+  cleanup_send() {
+    unset -f tmux 2>/dev/null || true
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  export ORCH_PROJECT
+  ORCH_PROJECT=$(mktemp -d)
+  ensure_agents_dir
+
+  tmux new-session -d -s "$sess" -c "$ORCH_PROJECT" -x 80 -y 24
+  local target="$sess:0.0"
+  local marker_file="$ORCH_PROJECT/send-line-marker"
+
+  send_line "$target" "printf x >> '$marker_file'"
+  sleep 0.5
+  assert_eq "x" "$(cat "$marker_file" 2>/dev/null)" \
+    "send_line executes shell command exactly once"
+
+  local long_path="$ORCH_PROJECT/.agents/prompts/path with spaces/agent.md"
+  send_bootstrap_message "$target" \
+    "BOOTSTRAP agent=agent-one context_file=$long_path loaded. Follow your Getting Started steps." \
+    2 100 >/dev/null 2>&1 || true
+  assert_contains "$(tail -5 "$(log_file)")" "BOOTSTRAP ok target=$target" \
+    "bootstrap verification uses short marker and does not time out on wrapped paths"
+
+  rm -rf "$ORCH_PROJECT"
+  cleanup_send
 }
 
 # ── tmux readiness poll ──────────────────────────────────────────────────
@@ -716,6 +820,14 @@ test_model_select() {
   ')
   assert_eq "claude 0 codex 1" "$out" "non-interactive: pre-set env respected"
 
+  out=$(bash -c '
+    export ORCH_SKIP_PERMISSIONS=1
+    source "$ORCHESTRATION_HOME/lib/model-select.sh"
+    ask_model_choices "$ORCHESTRATION_HOME/patterns/lean.sh"
+    echo "$ORCH_MODEL_orchestrator $ORCH_SKIP_PERMISSIONS_orchestrator $ORCH_MODEL_coder $ORCH_SKIP_PERMISSIONS_coder"
+  ')
+  assert_eq "claude 1 claude 1" "$out" "non-interactive: global skip permissions applies to roles"
+
   # Pattern with no AskModels line: function returns without exporting anything.
   out=$(bash -c '
     source "$ORCHESTRATION_HOME/lib/model-select.sh"
@@ -826,6 +938,49 @@ test_preflight() {
   assert_contains "$out" "duplicate agent id(s): a1" "orch-preflight reports duplicate ids"
 
   rm -rf "$dir"
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m repair retarget skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local sock="orch-preflight-$$"
+  local bin_dir; bin_dir=$(mktemp -d)
+  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_preflight_tmux() {
+    export PATH="$orig_path"
+    rm -rf "$bin_dir"
+    command tmux -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  dir=$(mktemp -d)
+  export ORCH_PROJECT="$dir"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init pf >/dev/null
+  tmux new-session -d -s pf -c "$dir" -x 100 -y 30
+  tmux split-window -h -t pf:0.0 -c "$dir"
+  tmux set-option -p -t pf:0.1 @orch_agent_id coder-1 >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder codex pf:0.99 >/dev/null
+  rm -f "$dir/.agents/tasks.json" "$dir/.agents/tasks.notify.json"
+
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-preflight" --repair 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-preflight --repair exits cleanly"
+  assert_contains "$out" "coder-1 target pf:0.99 -> pf:0.1" \
+    "orch-preflight --repair retargets stale roster target"
+  assert_eq "pf:0.1" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target coder-1)" \
+    "orch-preflight --repair persists repaired target"
+  [[ -f "$dir/.agents/tasks.json" ]] && pass "orch-preflight --repair creates tasks.json" \
+    || fail "orch-preflight --repair creates tasks.json"
+  [[ -f "$dir/.agents/tasks.notify.json" ]] && pass "orch-preflight --repair creates tasks.notify.json" \
+    || fail "orch-preflight --repair creates tasks.notify.json"
+
+  rm -rf "$dir"
+  cleanup_preflight_tmux
 }
 
 # ── run ──────────────────────────────────────────────────────────────────
@@ -841,9 +996,11 @@ case "$SUITE" in
   enforce)      test_enforce ;;
   preflight)    test_preflight ;;
   present-session) test_present_session ;;
+  pattern-defaults) test_pattern_defaults ;;
+  tmux-send)    test_tmux_send_helpers ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_present_session; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_present_session; test_pattern_defaults; test_tmux_send_helpers; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

@@ -70,6 +70,8 @@ Optional preflight before launching:
 
 ```bash
 orch-preflight
+# Repair required .agents files and stale roster pane targets:
+orch-preflight --repair
 ```
 
 ## Core Concepts
@@ -105,6 +107,9 @@ orchestrate list
 # Session
 orchestrate <pattern>
 orchestrate --switch-client <pattern>
+orchestrate --attach <pattern>
+orch-preflight
+orch-preflight --repair
 add-agent <role> <model> [--id <agent-id>] [--hats <h1,h2>]
 remove-agent <agent-id>
 end-session [--keep-tmux]
@@ -127,6 +132,9 @@ orch-task unblock <task-id> <agent-id> --note "unblocked"
 
 - Permission bypass is **opt-in**.
 - `orchestrate` now clears inherited `ORCH_SKIP_PERMISSIONS*` by default unless you explicitly choose bypass.
+- `--dangerously-skip-permissions` maps to each CLI's current bypass flag. For Codex CLI 0.125+, this is `codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen`.
+- `orchestrate` does not attach or switch your current tmux view by default. Use `--attach` outside tmux, or `--switch-client` inside tmux, when you want that behavior.
+- Spawner hats are **opt-in** for the small default patterns. Use `ORCH_ENABLE_SPAWNER_HATS=1 orchestrate <pattern>` if you want agents prompted to spawn helper agents.
 - To intentionally keep env overrides:
 
 ```bash
@@ -150,13 +158,14 @@ orch-enforce --status
 orch-enforce --off
 ```
 
-When launching from inside tmux, `orchestrate` does not switch your current client by default. Use `--switch-client` when you want the new orchestration session to take over the current tmux view.
+By default, `orchestrate` prints the command to view the created tmux session instead of taking over your current terminal.
 
 ## Known Issues
 
 Current known operational gaps:
 - Agent compliance drift: some agents may repeatedly echo/check-inbox without executing work unless task prompts are explicit and enforced.
 - Tmux delivery edge cases: pane notify can fail when target pane metadata is stale or shell/CLI state changes mid-send.
+- Codex/Claude CLI UI gates can change between releases. `orch-preflight --repair` can repair local state, but account/quota/update prompts may still require operator action.
 - Long-session state growth: runtime artifacts under `.agents/` may accumulate and need periodic cleanup in long-lived sessions.
 - Operator UX friction: many commands/flags increase chance of orchestration mistakes.
 
@@ -167,6 +176,7 @@ Use [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for immediate workarounds
 Priority improvements planned:
 - Guided control plane (`orch ui`) to reduce command memorization.
 - Optional per-coder git worktrees for multi-coder sessions.
+- Namespaced orchestration state (for example `ORCH_AGENTS_DIR=.agents-debug`) so multiple orchestration sessions can run safely in the same project.
 - Stronger enforcement lifecycle (`TASK -> ACK/IN_PROGRESS -> DONE/BLOCKED`) with better anti-loop detection.
 - Lower-noise automation (smarter nudges, clearer intervention prompts).
 - Better session hygiene tooling for pruning/archive management.

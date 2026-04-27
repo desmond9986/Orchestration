@@ -21,7 +21,10 @@ Optional:
 
 ```bash
 orch-preflight
+orch-preflight --repair
 ```
+
+Use `orch-preflight --repair` when panes were reordered, tmux targets look stale, or required `.agents` files are missing. It recreates required task-state files and retargets active roster entries by matching live tmux pane metadata (`@orch_agent_id`).
 
 ## 2) Launch
 
@@ -84,6 +87,16 @@ export ORCH_DELIVERY=silent
 ## Model and permissions controls
 
 - `orchestrate` prompts role-by-role for model and permission bypass (interactive mode).
-- `--yolo` skips questionnaire and uses pattern defaults.
+- `--yolo` skips the questionnaire and uses pattern defaults. It does **not** mean permission bypass by itself.
 - `--dangerously-skip-permissions` enables bypass for that run.
 - `--respect-env-skip-permissions` keeps existing `ORCH_SKIP_PERMISSIONS*` env values.
+
+Codex CLI mapping:
+
+```bash
+# normal
+codex --no-alt-screen
+
+# with --dangerously-skip-permissions / ORCH_SKIP_PERMISSIONS=1
+codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+```

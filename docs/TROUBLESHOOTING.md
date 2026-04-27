@@ -25,6 +25,7 @@ This is usually a tmux target/notify issue. Check:
 ```bash
 orch-status --log
 bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
+orch-preflight --repair
 ```
 
 Then nudge directly:
@@ -48,6 +49,17 @@ orch-preflight
 ```
 
 Fix by removing/re-adding the duplicated entry via `remove-agent` / `add-agent`.
+
+## Pane reordered or roster target stale
+
+If you changed tmux layout, moved panes, or restored a session and roster targets no longer match:
+
+```bash
+orch-preflight --repair
+bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active
+```
+
+Repair uses tmux pane metadata (`@orch_agent_id`) to rewrite stale active-agent targets in `.agents/roster.json`.
 
 ## Task board inconsistent
 

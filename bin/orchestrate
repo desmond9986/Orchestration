@@ -13,13 +13,15 @@
 #                                  (claude --dangerously-skip-permissions, codex --yolo)
 #   --respect-env-skip-permissions keep ORCH_SKIP_PERMISSIONS* env overrides as-is
 #   --switch-client                when already inside tmux, switch to the new session
-#   --no-attach                    outside tmux, print attach command instead of attaching
+#   --attach                       outside tmux, attach to the new session
+#   --no-attach                    outside tmux, print attach command (default)
 #
 # Examples:
 #   orchestrate recommend               # not sure which pattern? answer a few questions
 #   orchestrate lean
 #   orchestrate --yolo lean             # skip prompts, use defaults
 #   orchestrate --switch-client lean    # switch current tmux client after launch
+#   orchestrate --attach lean           # attach when launched outside tmux
 #   orchestrate --respect-env-skip-permissions lean
 #   orchestrate swarm 4                 # swarm with 4 coders
 #   orchestrate freeform                # empty session, add agents manually
@@ -137,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --dangerously-skip-permissions) export ORCH_SKIP_PERMISSIONS=1; shift ;;
     --respect-env-skip-permissions) RESPECT_ENV_SKIP=1; shift ;;
     --switch-client|--switch) export ORCH_AUTO_SWITCH_IN_TMUX=1; shift ;;
+    --attach) export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=1; shift ;;
     --no-attach) export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0; shift ;;
     -h|--help) usage; exit 0 ;;
     recommend) cmd_recommend; exit 0 ;;
@@ -188,7 +191,6 @@ bash "$PATTERN_FILE" "$@"
 # Inside tmux this should be non-destructive by default.
 SESSION=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" session 2>/dev/null || echo "")
 if [[ -n "$SESSION" ]]; then
-  ok "session '$SESSION' ready"
   source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
   present_session "$SESSION"
 fi

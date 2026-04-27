@@ -10,8 +10,8 @@
 #   ORCH_MODEL_<role>              — model name
 #   ORCH_SKIP_PERMISSIONS_<role>   — "1" or "0"
 #
-# spawn-agent.sh reads ORCH_SKIP_PERMISSIONS_<role> first, falls back to
-# the global ORCH_SKIP_PERMISSIONS if set, then defaults to 0.
+# spawn-agent.sh treats ORCH_SKIP_PERMISSIONS=1 as a launch-wide bypass.
+# Per-role ORCH_SKIP_PERMISSIONS_<role>=1 can also opt in one role.
 #
 # Skipped when stdin is not a tty (piped/scripted invocations keep defaults).
 #
@@ -35,8 +35,8 @@ ask_model_choices() {
   local pattern_file="$1"
 
   local meta
-  meta=$(grep -m1 '^# AskModels:' "$pattern_file" 2>/dev/null \
-         | sed 's/^# AskModels: *//')
+  meta=$(grep -m1 '^# AskModels:' "$pattern_file" 2>/dev/null || true)
+  meta=$(printf "%s" "$meta" | sed 's/^# AskModels: *//')
   [[ -n "$meta" ]] || return 0
 
   # Non-interactive: apply defaults silently, honour pre-set env vars.
@@ -45,7 +45,7 @@ ask_model_choices() {
       local role="${pair%%:*}" default="${pair#*:}"
       local mv="ORCH_MODEL_${role}" pv="ORCH_SKIP_PERMISSIONS_${role}"
       [[ -z "${!mv:-}" ]] && export "ORCH_MODEL_${role}=${default}"
-      [[ -z "${!pv:-}" ]] && export "ORCH_SKIP_PERMISSIONS_${role}=0"
+      [[ -z "${!pv:-}" ]] && export "ORCH_SKIP_PERMISSIONS_${role}=${ORCH_SKIP_PERMISSIONS:-0}"
     done
     return 0
   fi

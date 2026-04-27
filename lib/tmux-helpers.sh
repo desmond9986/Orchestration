@@ -104,10 +104,35 @@ is_shell_pane() {
   esac
 }
 
+wait_for_shell_input_ready() {
+  local target="$1"
+  local max_ms="${2:-${ORCH_SHELL_READY_MAX_MS:-2000}}"
+  local poll_ms="${3:-${ORCH_SHELL_READY_POLL_MS:-50}}"
+  [[ "$max_ms" =~ ^[0-9]+$ ]] || max_ms=2000
+  [[ "$poll_ms" =~ ^[0-9]+$ ]] || poll_ms=50
+  local start_ms now_ms sleep_s output
+  start_ms=$(( $(date +%s) * 1000 ))
+  sleep_s=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+  while :; do
+    if is_shell_pane "$target"; then
+      output=$(tmux capture-pane -p -t "$target" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$output" ]]; then
+        return 0
+      fi
+    fi
+    now_ms=$(( $(date +%s) * 1000 ))
+    if (( now_ms - start_ms >= max_ms )); then
+      log_line "SHELL_READY timeout target=$target wait_ms=$((now_ms - start_ms))"
+      return 1
+    fi
+    sleep "$sleep_s"
+  done
+}
+
 # Single submit key path (CR) used consistently across helpers.
 send_submit_key() {
   local target="$1"
-  tmux send-keys -t "$target" C-m
+  tmux send-keys -t "$target" Enter
 }
 
 # Ensure Enter is delivered and observed by pane-state change.
@@ -146,10 +171,12 @@ ensure_submit_enter() {
 # Currently tuned for Codex's visible "[Pasted Content ...]" marker.
 has_pending_pasted_draft() {
   local target="$1"
-  # Match active input line style: "> ... [Pasted Content N chars]"
+  # Match active input line styles:
+  #   > ... [Pasted Content N chars]
+  #   › ... [Pasted Content N chars]
   # We intentionally only inspect recent lines to avoid historical matches.
   tmux capture-pane -p -t "$target" 2>/dev/null | tail -n 8 \
-    | grep -qE '^> .*\[Pasted Content [0-9]+ chars\]'
+    | grep -qE '^[>›] .*\[Pasted Content [0-9]+ chars\]'
 }
 
 # Try to submit pasted draft until UI marker disappears.
@@ -210,12 +237,20 @@ send_bootstrap_message() {
   [[ "$delay_ms" =~ ^[0-9]+$ ]] || delay_ms=350
   local delay_s
   delay_s=$(awk -v ms="$delay_ms" 'BEGIN { printf "%.3f", ms/1000 }')
+  local marker="$message"
+  case "$message" in
+    BOOTSTRAP\ agent=*\ context_file=*) marker="${message%% context_file=*}" ;;
+  esac
   local i
   for (( i=1; i<=max; i++ )); do
+    if pane_contains_text "$target" "$marker"; then
+      log_line "BOOTSTRAP ok target=$target attempts=$i marker=preexisting"
+      return 0
+    fi
     paste_text_to_pane "$target" "$message"
     ensure_submit_enter "$target" || true
     sleep "$delay_s"
-    if pane_contains_text "$target" "$message"; then
+    if pane_contains_text "$target" "$marker"; then
       log_line "BOOTSTRAP ok target=$target attempts=$i"
       return 0
     fi
@@ -243,8 +278,11 @@ paste_to_pane() {
 # Send a single command line to a pane (with Enter).
 send_line() {
   local target="$1"; shift
-  paste_text_to_pane "$target" "$*"
-  ensure_submit_enter "$target" || true
+  local line="$*"
+  wait_for_shell_input_ready "$target" || true
+  tmux send-keys -t "$target" -l "$line"
+  send_submit_key "$target"
+  log_line "SEND_LINE target=$target line=$(printf "%q" "$line")"
 }
 
 # Set the title of a pane to its agent id (helps human navigate).
@@ -343,13 +381,49 @@ wait_for_input_prompt() {
   local max="${2:-${ORCH_CLI_READY_MAX:-8}}"
   local deadline=$(( $(date +%s) + max ))
   while (( $(date +%s) < deadline )); do
-    # Match the bare chat input prompt (❯ with optional trailing spaces/cursor)
-    # but NOT the trust-dialog option line (❯ 1. Yes, I trust this folder).
-    if tmux capture-pane -p -t "$target" 2>/dev/null | grep -qE '^❯[[:space:]]*$'; then
+    # Match bare chat input prompts but NOT trust-dialog option lines like:
+    #   ❯ 1. Yes, I trust this folder
+    #   › 1. Yes, continue
+    if tmux capture-pane -p -t "$target" 2>/dev/null | grep -qE '^[❯›][[:space:]]*$'; then
       return 0
     fi
     sleep 0.3
   done
+  return 1
+}
+
+pane_has_codex_trust_gate() {
+  local target="$1"
+  tmux capture-pane -p -t "$target" 2>/dev/null \
+    | grep -Eq 'Do you trust the contents of this directory|Press enter to continue'
+}
+
+pane_has_codex_input_prompt() {
+  local target="$1"
+  tmux capture-pane -p -t "$target" 2>/dev/null | tail -n 12 \
+    | grep -Eq '^›([[:space:]]|$)|gpt-[0-9][^·]*·'
+}
+
+wait_for_codex_prompt_or_gate() {
+  local target="$1"
+  local max="${2:-${ORCH_CLI_READY_MAX:-8}}"
+  local deadline=$(( $(date +%s) + max ))
+  while (( $(date +%s) < deadline )); do
+    if pane_has_codex_trust_gate "$target"; then
+      echo "trust"
+      return 0
+    fi
+    if pane_has_codex_input_prompt "$target"; then
+      echo "prompt"
+      return 0
+    fi
+    if is_shell_pane "$target"; then
+      echo "shell"
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "timeout"
   return 1
 }
 
@@ -366,7 +440,7 @@ present_session() {
       info "or press Ctrl-B, S to pick a session"
     fi
   else
-    if [[ "${ORCH_AUTO_ATTACH_OUTSIDE_TMUX:-1}" == "1" ]]; then
+    if [[ "${ORCH_AUTO_ATTACH_OUTSIDE_TMUX:-0}" == "1" ]]; then
       tmux attach-session -t "$session"
     else
       info "session '$session' ready"

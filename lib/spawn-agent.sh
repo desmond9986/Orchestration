@@ -211,10 +211,15 @@ with_file_lock "$(agents_dir)/spawn.lock.d" _allocate_target_and_register
 launch_cli_cmd() {
   local model="$1"
   # Per-role var wins; fall back to global flag; default to 0.
-  # Nested ${!var:-${other:-0}} is not reliable in bash 3.2; resolve in steps.
+  # Global ORCH_SKIP_PERMISSIONS=1 is an explicit launch-wide bypass and must
+  # not be cancelled by model-select's per-role default of 0.
   local role_var="ORCH_SKIP_PERMISSIONS_${ROLE}"
-  local skip="${!role_var:-}"
-  skip="${skip:-${ORCH_SKIP_PERMISSIONS:-0}}"
+  local role_skip="${!role_var:-0}"
+  local global_skip="${ORCH_SKIP_PERMISSIONS:-0}"
+  local skip=0
+  if [[ "$global_skip" == "1" || "$role_skip" == "1" ]]; then
+    skip=1
+  fi
   case "$model" in
     claude)
       local flags="--append-system-prompt-file '$PROMPT_FILE'"
@@ -222,8 +227,11 @@ launch_cli_cmd() {
       echo "claude $flags"
       ;;
     codex)
-      if [[ "$skip" == "1" ]]; then echo "codex --yolo"
-      else echo "codex"; fi
+      if [[ "$skip" == "1" ]]; then
+        echo "codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
+      else
+        echo "codex --no-alt-screen"
+      fi
       ;;
     gemini)     echo "gemini chat" ;;
     shell|none) echo "cat '$PROMPT_FILE'" ;;
@@ -283,13 +291,36 @@ case "$MODEL" in
   *)
     # codex / gemini: paste the full prompt file as the first message.
     wait_for_cli_ready "$TARGET" || warn "CLI readiness timed out for $ID — pasting anyway"
+    if [[ "$MODEL" == "codex" ]]; then
+      codex_state=$(wait_for_codex_prompt_or_gate "$TARGET" "${ORCH_CODEX_GATE_MAX:-12}" || true)
+      if [[ "$codex_state" == "trust" ]]; then
+        send_message_submit "$TARGET" "1" || true
+        log_line "CODEX_TRUST_GATE: id=$ID target=$TARGET action=select_continue"
+        wait_for_input_prompt "$TARGET" "${ORCH_CODEX_PROMPT_MAX:-15}" \
+          || warn "Codex input prompt timed out for $ID after trust gate"
+      elif [[ "$codex_state" == "timeout" ]]; then
+        warn "Codex prompt/trust detection timed out for $ID"
+        log_line "CODEX_GATE_TIMEOUT: id=$ID target=$TARGET"
+      fi
+    fi
+    if is_shell_pane "$TARGET"; then
+      warn "CLI exited before prompt delivery for $ID — skipping prompt/bootstrap"
+      log_line "PROMPT_SKIPPED: id=$ID target=$TARGET reason=cli_exited"
+      status_line "orchestration" "SPAWN_FAILED $ID role=$ROLE model=$MODEL target=$TARGET reason=cli_exited"
+      ok "spawned: $ID → $TARGET"
+      exit 0
+    fi
     paste_to_pane "$TARGET" "$PROMPT_FILE"
     # Optional additional submit burst for stubborn draft states.
     if [[ "${ORCH_PASTE_EXTRA_ENTER:-1}" == "1" ]]; then
       ensure_submit_enter "$TARGET" "${ORCH_PASTE_EXTRA_ENTER_MAX:-2}" "${ORCH_PASTE_EXTRA_ENTER_DELAY_MS:-300}" || true
       submit_until_draft_clears "$TARGET" "${ORCH_PASTE_EXTRA_DRAFT_MAX:-8}" "${ORCH_PASTE_EXTRA_DRAFT_DELAY_MS:-350}" || true
     fi
-    send_bootstrap_message "$TARGET" "$BOOTSTRAP_TOKEN loaded. Follow your Getting Started steps." || true
+    if [[ "$MODEL" == "codex" ]]; then
+      log_line "PROMPT_DELIVERED: id=$ID target=$TARGET model=$MODEL"
+    else
+      send_bootstrap_message "$TARGET" "$BOOTSTRAP_TOKEN loaded. Follow your Getting Started steps." || true
+    fi
     ;;
 esac
 
