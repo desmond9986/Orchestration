@@ -38,7 +38,7 @@ Note which roles are present and missing. Common gaps and how to handle them:
 | `reviewer` | Either wear the hat, or request human review, or self-review |
 | `qa` | Either wear the hat, or require coders to verify on real env before DONE |
 | `debugger` | Route bugs back to the original coder |
-| `ui-ux-designer` | Wear the hat: write the design spec yourself before assigning coders; optionally generate an HTML prototype with the huashu-design skill |
+| `ui-ux-designer` | Wear the hat: write the design spec yourself before assigning coders; optionally generate an HTML prototype with the huashu-design skill; review coder implementations against the spec and issue verdicts before marking DONE |
 
 ## Step 2: Plan
 
