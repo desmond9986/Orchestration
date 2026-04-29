@@ -60,10 +60,26 @@ cd ~/your-project
 orchestrate lean
 ```
 
+Not sure which pattern to use? Run the interactive recommender:
+
+```bash
+orchestrate recommend
+```
+
 Then in another terminal:
 
 ```bash
 orch-status --follow
+```
+
+Optional: drop project context before launching so agents know your stack:
+
+```bash
+mkdir -p .agents
+cat > .agents/PROJECT_CONTEXT.md <<'EOF'
+Stack: ...
+Constraints: ...
+EOF
 ```
 
 Optional preflight before launching:
@@ -106,6 +122,8 @@ orchestrate list
 ```bash
 # Session
 orchestrate <pattern>
+orchestrate recommend                 # answer questions, get a pattern recommendation
+orchestrate --yolo <pattern>          # skip model-choice prompts, use pattern role defaults (does not bypass permissions)
 orchestrate --switch-client <pattern>
 orchestrate --attach <pattern>
 orch-preflight
@@ -132,7 +150,8 @@ orch-task unblock <task-id> <agent-id> --note "unblocked"
 
 - Permission bypass is **opt-in**.
 - `orchestrate` now clears inherited `ORCH_SKIP_PERMISSIONS*` by default unless you explicitly choose bypass.
-- `--dangerously-skip-permissions` maps to each CLI's current bypass flag. For Codex CLI 0.125+, this is `codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen`.
+- `--yolo` skips the interactive model-choice prompts and uses each pattern's defaults. It does **not** enable permission bypass.
+- `--dangerously-skip-permissions` is the actual bypass flag. It maps to each CLI's current bypass. For Codex CLI 0.125+, this is `codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen`.
 - `orchestrate` does not attach or switch your current tmux view by default. Use `--attach` outside tmux, or `--switch-client` inside tmux, when you want that behavior.
 - Spawner hats are **opt-in** for the small default patterns. Use `ORCH_ENABLE_SPAWNER_HATS=1 orchestrate <pattern>` if you want agents prompted to spawn helper agents.
 - To intentionally keep env overrides:
