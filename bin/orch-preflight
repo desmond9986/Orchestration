@@ -75,7 +75,8 @@ check_roster_integrity() {
   fi
 
   local dup
-  dup=$(jq -r '[.agents[].id] | group_by(.)[] | select(length>1) | .[0]' "$ROSTER" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  dup=$(jq -r '[.agents[] | select(.status=="active") | .id] | group_by(.)[] | select(length>1) | .[0]' "$ROSTER" \
+    | tr '\n' ' ' | sed 's/[[:space:]]*$//')
   if [[ -n "$dup" ]]; then
     warn "duplicate agent id(s): $dup"
     missing=1
@@ -151,8 +152,14 @@ repair_roster_targets() {
       warn "repair: ambiguous panes for $id; leaving target unchanged"
       warnings=$((warnings+1))
     else
-      warn "repair: no live pane with @orch_agent_id=$id; leaving target unchanged"
-      warnings=$((warnings+1))
+      # No live pane found — mark the entry as left so it stops polluting checks.
+      tmp=$(mktemp)
+      jq --arg id "$id" --arg t "$(ts)" \
+        '(.agents[] | select(.id==$id and .status=="active") | .status) = "left" |
+         (.agents[] | select(.id==$id and .status=="left") | .left) = $t' \
+        "$ROSTER" > "$tmp" && mv "$tmp" "$ROSTER"
+      ok "repair: marked dead agent $id as left (pane gone)"
+      changed=$((changed+1))
     fi
   done < <(jq -r '.agents[] | select(.status=="active") | [.id,.target] | @tsv' "$ROSTER")
 

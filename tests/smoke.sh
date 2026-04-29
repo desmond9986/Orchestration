@@ -574,7 +574,7 @@ test_present_session() {
     "present_session inside tmux prints manual switch guidance by default"
 
   rc=0
-  out=$(bash -c '
+  out=$(TMUX= bash -c '
     export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
     export ORCH_PROJECT="'"$proj"'"
     source "$ORCHESTRATION_HOME/lib/common.sh"

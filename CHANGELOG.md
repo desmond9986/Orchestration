@@ -8,6 +8,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Added
 - `orch-preflight` command to validate local dependencies, roster integrity, and bypass-env safety before orchestration runs.
 - `orch-preflight --repair` to recreate required `.agents` task files and repair stale roster pane targets from tmux `@orch_agent_id` metadata.
+- `ui-ux-designer` core role and hat for design-spec-first UI workflows; integrates with the `huashu-design` skill for HTML prototype generation.
 - GitHub CI workflow (shell lint, syntax check, smoke tests).
 - Issue templates and pull request template.
 - Open-source baseline files: `NOTICE`, `.env.example`, `VERSION`.
