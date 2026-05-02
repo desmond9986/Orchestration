@@ -27,6 +27,11 @@ for cmd in tmux jq; do
     ok "found: $cmd"
   fi
 done
+if command -v python3 >/dev/null 2>&1; then
+  ok "found: python3 (orch-tui interactive)"
+else
+  warn "python3 not found. orch-tui --snapshot will work, but full-screen orch-tui needs python3."
+fi
 # CLI readiness polling hashes tmux pane content. Any of these works;
 # shasum ships with macOS, sha1sum with GNU coreutils, cksum is POSIX.
 if command -v shasum >/dev/null 2>&1 \
@@ -79,12 +84,16 @@ echo "  2. Verify: orchestrate --help"
 echo "  3. Start a session: cd /your/project && orchestrate lean"
 echo ""
 echo "Commands available:"
+echo "  orch-tui                    full-screen terminal control panel"
 echo "  orchestrate <pattern>       start a session"
 echo "  orchestrate list            list available patterns"
+echo "  orchestrate --iterm-cc lean start and attach with iTerm2 tmux control mode"
 echo "  add-agent <role> <model>    add an agent mid-session"
 echo "  remove-agent <id>           remove an agent"
 echo "  orch-status                 show roster + recent status"
 echo "  orch-status --follow        tail the status board"
+echo "  orch-inbox peek <agent>     inspect unread inbox without archiving"
 echo "  orch-enforce --on           start enforcement loop"
 echo "  orch-preflight              validate deps + roster before running"
+echo "  orch-restore                rebuild panes from .agents if tmux session is missing"
 echo "  end-session                 archive + tear down"

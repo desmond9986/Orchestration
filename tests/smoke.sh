@@ -33,6 +33,12 @@ assert_contains() { # haystack needle description
   fi
 }
 
+assert_not_contains() { # haystack needle description
+  if [[ "$1" != *"$2"* ]]; then pass "$3"
+  else fail "$3 (unexpected needle='$2' in: $1)"
+  fi
+}
+
 assert_fails() { # description, command...
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then fail "$desc (expected failure but succeeded)"
@@ -54,7 +60,8 @@ test_roster() {
   fresh_project; local dir="$ORCH_PROJECT"
 
   bash "$ORCHESTRATION_HOME/lib/roster.sh" add a1 coder claude "s:0.0" >/dev/null
-  bash "$ORCHESTRATION_HOME/lib/roster.sh" add a2 coder codex  "s:0.1" >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add a2 coder codex  "s:0.1" \
+    --resume-provider codex --resume-id 019de80b-e52e-7682-a818-a17496aa0140 --resume-mode exact >/dev/null
 
   local out
   out=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" find-role coder | tr '\n' ' ')
@@ -62,12 +69,25 @@ test_roster() {
 
   assert_eq "s:0.0" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target a1)" \
     "target returns active agent's target"
+  assert_eq "019de80b-e52e-7682-a818-a17496aa0140" \
+    "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" resume a2 | jq -r '.id')" \
+    "resume returns stored chat id"
+
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" set-resume a2 codex 019de80b-e52e-7682-a818-a17496aa0141 --mode exact >/dev/null
+  assert_eq "019de80b-e52e-7682-a818-a17496aa0141" \
+    "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" resume a2 | jq -r '.id')" \
+    "set-resume updates stored chat id"
 
   bash "$ORCHESTRATION_HOME/lib/roster.sh" remove a1 >/dev/null
   assert_eq "" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target a1)" \
     "target returns empty for removed agent (#3)"
   assert_eq "s:0.0" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target-any a1)" \
     "target-any still resolves removed agent for archival reads"
+
+  assert_fails "resume of removed agent id is rejected" \
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" resume a1
+  assert_fails "resume of unknown agent id is rejected" \
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" resume does-not-exist
 
   assert_fails "remove of unknown agent id is rejected" \
     bash "$ORCHESTRATION_HOME/lib/roster.sh" remove does-not-exist
@@ -107,12 +127,15 @@ test_protocol() {
   assert_contains "$peek" "[TASK]" "peek-inbox renders type"
   assert_contains "$peek" "FROM: a1" "peek-inbox renders sender"
   assert_contains "$peek" "TO:   a2" "peek-inbox renders recipient"
+  local inbox_peek
+  inbox_peek=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-inbox" peek a2)
+  assert_contains "$inbox_peek" "hello" "orch-inbox peek renders payload"
   local read_out
-  read_out=$(bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-inbox a2)
+  read_out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-inbox" check a2)
   assert_contains "$read_out" "FROM: a1" "check-inbox renders sender"
   assert_contains "$read_out" "TO:   a2" "check-inbox renders recipient"
   local arch
-  arch=$(bash "$ORCHESTRATION_HOME/lib/protocol.sh" check-archive a2)
+  arch=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-inbox" archive a2)
   assert_contains "$arch" "hello" "check-archive renders archived payload"
   assert_contains "$arch" "FROM: a1" "check-archive renders sender"
 
@@ -543,7 +566,7 @@ test_present_session() {
   local real_tmux; real_tmux=$(command -v tmux)
   local sock="orch-present-$$"
   local bin_dir; bin_dir=$(mktemp -d)
-  printf '#!/bin/bash\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  printf '#!/bin/bash\nif [[ "$1" == "-CC" ]]; then echo "TMUX_CC $*"; exit 0; fi\nexec "%s" -L "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
   chmod +x "$bin_dir/tmux"
   local orig_path="$PATH"
   export PATH="$bin_dir:$PATH"
@@ -584,6 +607,50 @@ test_present_session() {
   assert_eq "0" "$rc" "present_session outside tmux exits cleanly by default"
   assert_contains "$out" "attach with: tmux attach-session -t 'beta'" \
     "present_session outside tmux prints attach guidance by default"
+
+  rc=0
+  out=$(TMUX= ORCH_AUTO_ATTACH_ITERM_CC=1 bash -c '
+    export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
+    export ORCH_PROJECT="'"$proj"'"
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    present_session beta
+  ' 2>&1) || rc=$?
+  assert_eq "0" "$rc" "present_session supports iTerm control-mode attach outside tmux"
+  assert_contains "$out" "TMUX_CC -CC attach-session -t beta" \
+    "present_session runs tmux -CC attach-session for iTerm control mode"
+
+  rc=0
+  out=$(TMUX=1 ORCH_AUTO_ATTACH_ITERM_CC=1 bash -c '
+    export ORCHESTRATION_HOME="'"$ORCHESTRATION_HOME"'"
+    export ORCH_PROJECT="'"$proj"'"
+    source "$ORCHESTRATION_HOME/lib/common.sh"
+    source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+    present_session beta
+  ' 2>&1) || rc=$?
+  assert_eq "0" "$rc" "present_session does not run iTerm control mode inside tmux"
+  assert_contains "$out" "run outside tmux: tmux -CC attach-session -t 'beta'" \
+    "present_session prints safe iTerm control-mode command inside tmux"
+
+  local proj_flags
+  proj_flags=$(mktemp -d)
+  rc=0
+  out=$(cd "$proj_flags" && bash "$ORCHESTRATION_HOME/bin/orchestrate" --iterm-cc --no-attach freeform 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orchestrate parses --iterm-cc --no-attach"
+  assert_not_contains "$out" "TMUX_CC" "orchestrate --no-attach cancels prior --iterm-cc"
+  assert_contains "$out" "iTerm control mode: tmux -CC attach-session -t 'freeform'" \
+    "orchestrate --no-attach prints iTerm control-mode guidance"
+  tmux kill-session -t freeform 2>/dev/null || true
+  rm -rf "$proj_flags"
+
+  proj_flags=$(mktemp -d)
+  rc=0
+  out=$(cd "$proj_flags" && bash "$ORCHESTRATION_HOME/bin/orchestrate" --no-attach -CC freeform 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orchestrate parses --no-attach -CC"
+  assert_contains "$out" "TMUX_CC -CC attach-session -t freeform" \
+    "orchestrate -CC wins when it is the last presentation flag"
+  tmux kill-session -t freeform 2>/dev/null || true
+  rm -rf "$proj_flags"
 
   tmux kill-session -t alpha 2>/dev/null || true
   tmux kill-session -t beta 2>/dev/null || true
@@ -668,7 +735,10 @@ test_tmux_send_helpers() {
   local marker_file="$ORCH_PROJECT/send-line-marker"
 
   send_line "$target" "printf x >> '$marker_file'"
-  sleep 0.5
+  for _ in {1..30}; do
+    [[ "$(cat "$marker_file" 2>/dev/null || true)" == "x" ]] && break
+    sleep 0.1
+  done
   assert_eq "x" "$(cat "$marker_file" 2>/dev/null)" \
     "send_line executes shell command exactly once"
 
@@ -681,6 +751,366 @@ test_tmux_send_helpers() {
 
   rm -rf "$ORCH_PROJECT"
   cleanup_send
+}
+
+# ── orch-tui ─────────────────────────────────────────────────────────────
+test_tui() {
+  printf "\n\033[1morch-tui\033[0m\n"
+
+  local dir out bin_dir orig_path
+  dir=$(mktemp -d)
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-tui" --snapshot 2>&1)
+  assert_contains "$out" "session: none" "orch-tui snapshot handles project without session"
+  assert_contains "$out" "no active .agents/roster.json" "orch-tui snapshot explains missing roster"
+  rm -rf "$dir"
+
+  dir=$(mktemp -d)
+  export ORCH_PROJECT="$dir"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init tui-smoke >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder none tui-smoke:0.0 >/dev/null
+  mkdir -p "$dir/.agents/inbox"
+  printf '{"id":"m1","read":false,"payload":"hello"}\n' > "$dir/.agents/inbox/coder-1.jsonl"
+  printf '{"id":"old","read":false,"payload":"archived"}\n' > "$dir/.agents/inbox/coder-1.archive.jsonl"
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-tui" --snapshot 2>&1)
+  assert_contains "$out" "session: tui-smoke" "orch-tui snapshot shows session name"
+  assert_contains "$out" "active agents: 1" "orch-tui snapshot shows active agent count"
+  assert_contains "$out" "unread inbox messages: 1" "orch-tui snapshot shows unread inbox count"
+  assert_contains "$out" "coder-1" "orch-tui snapshot includes roster agent"
+  rm -rf "$dir"
+
+  out=$(bash "$ORCHESTRATION_HOME/bin/orch-tui" --help 2>&1)
+  assert_contains "$out" "thin control surface" "orch-tui help states wrapper design rule"
+
+  if ! command -v tmux >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m skipped full-screen interactive checks (tmux/python3 missing)\n"
+    return 0
+  fi
+
+  local real_tmux sock sess target
+  real_tmux=$(command -v tmux)
+  sock="orch-tui-$$"
+  tmux() { command "$real_tmux" -L "$sock" "$@"; }
+  cleanup_tui_tmux() {
+    unset -f tmux 2>/dev/null || true
+    command "$real_tmux" -L "$sock" kill-server 2>/dev/null || true
+  }
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  orig_path="$PATH"
+  cat > "$bin_dir/orchestrate" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+env | grep '^ORCH_MODEL_' | sort >> "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orchestrate"
+  sess="tui-dispatch-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/args.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" /
+  sleep 0.2
+  tmux send-keys -t "$target" "swarm" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" l
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" "*" Enter
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "[--yolo]" \
+    "orch-tui selected pattern start uses non-interactive launch flags"
+  assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "[swarm]" \
+    "orch-tui full-screen session starts selected pattern"
+  assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "[*]" \
+    "orch-tui extra args do not glob-expand"
+  assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "ORCH_MODEL_coder=codex" \
+    "orch-tui pattern launch defaults model override to codex"
+  assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "ORCH_MODEL_orchestrator=codex" \
+    "orch-tui pattern launch applies model override to all pattern roles"
+  assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
+    "orch-tui full-screen session exits cleanly"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-preflight" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf 'preflight:%s\n' "$*" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-preflight"
+  sess="tui-health-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 5
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  for _ in {1..30}; do
+    [[ -f "$dir/task.out" ]] && break
+    sleep 0.1
+  done
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "preflight:" \
+    "orch-tui full-screen health preflight dispatches existing command"
+  assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
+    "orch-tui full-screen health exits cleanly"
+  rm -rf "$dir"
+  rm -rf "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-preflight" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf 'preflight:%s\n' "$*" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-preflight"
+  sess="tui-palette-cancel-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" :
+  sleep 0.2
+  tmux send-keys -t "$target" "preflight" Enter
+  sleep 0.3
+  tmux send-keys -t "$target" q
+  sleep 0.2
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_eq "" "$(cat "$dir/preflight.out" 2>/dev/null || true)" \
+    "orch-tui action picker does not auto-run fuzzy match"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-preflight" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf 'preflight:%s\n' "$*" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-preflight"
+  sess="tui-palette-run-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" :
+  sleep 0.2
+  tmux send-keys -t "$target" "preflight" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "preflight:" \
+    "orch-tui action picker dispatches selected action"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-preflight" <<'EOF_STUB'
+#!/usr/bin/env bash
+trap 'printf "terminated\n" > "$ORCH_TUI_CANCEL_OUT"; exit 143' TERM
+printf 'started\n' > "$ORCH_TUI_STUB_OUT"
+while :; do sleep 0.1 & wait $!; done
+EOF_STUB
+  chmod +x "$bin_dir/orch-preflight"
+  sess="tui-cancel-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' ORCH_TUI_CANCEL_OUT='$dir/cancel.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 5
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  for _ in {1..30}; do
+    [[ -f "$dir/preflight.out" ]] && break
+    sleep 0.1
+  done
+  tmux send-keys -t "$target" x
+  for _ in {1..30}; do
+    [[ -f "$dir/cancel.out" ]] && break
+    sleep 0.1
+  done
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "started" \
+    "orch-tui starts long-running command in background"
+  assert_contains "$(cat "$dir/cancel.out" 2>/dev/null || true)" "terminated" \
+    "orch-tui x cancels running command"
+  assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
+    "orch-tui exits after cancelling running command"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  mkdir -p "$dir/.agents/inbox"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-tasks","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  cat > "$dir/.agents/tasks.json" <<EOF_TASKS
+{"tasks":[{"id":"t-1","title":"Build task tab","status":"claimed","owner":"coder-1","depends_on":[],"note":"render inspector"}]}
+EOF_TASKS
+  sess="tui-tasks-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 4
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
+    "orch-tui task tab renders without crashing"
+  rm -rf "$dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  mkdir -p "$dir/.agents/inbox"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-task-action","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  cat > "$dir/.agents/tasks.json" <<EOF_TASKS
+{"tasks":[{"id":"t-1","title":"Inspect selected task","status":"pending","owner":null,"depends_on":[]}]}
+EOF_TASKS
+  cat > "$bin_dir/orch-task" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-task"
+  sess="tui-task-action-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/task.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 4
+  sleep 0.2
+  tmux send-keys -t "$target" l
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/task.out" 2>/dev/null || true)" "[show]" \
+    "orch-tui task action runs orch-task show"
+  assert_contains "$(cat "$dir/task.out" 2>/dev/null || true)" "[t-1]" \
+    "orch-tui task action defaults to selected task"
+  assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
+    "orch-tui selected task action exits cleanly"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  mkdir -p "$dir/.agents/inbox"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-task-owner","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"},{"id":"coder-2","role":"coder","model":"codex","target":"tui:0.1","status":"active"}]}
+EOF_ROSTER
+  cat > "$dir/.agents/tasks.json" <<EOF_TASKS
+{"tasks":[{"id":"t-2","title":"Owned task","status":"claimed","owner":"coder-2","depends_on":[]}]}
+EOF_TASKS
+  cat > "$bin_dir/orch-task" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-task"
+  sess="tui-task-owner-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/owner.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 4
+  sleep 0.2
+  tmux send-keys -t "$target" l l l
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" "done" Enter
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_contains "$(cat "$dir/owner.out" 2>/dev/null || true)" "[complete]" \
+    "orch-tui complete action dispatches"
+  assert_contains "$(cat "$dir/owner.out" 2>/dev/null || true)" "[coder-2]" \
+    "orch-tui task owner action defaults to selected task owner"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  mkdir -p "$dir/.agents/inbox"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-inbox","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  cat > "$dir/.agents/tasks.json" <<EOF_TASKS
+{"tasks":[]}
+EOF_TASKS
+  cat > "$bin_dir/orch-inbox" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-inbox"
+  sess="tui-inbox-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/inbox.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux send-keys -t "$target" 2
+  sleep 0.2
+  tmux send-keys -t "$target" l l l
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.2
+  tmux send-keys -t "$target" Enter
+  sleep 0.5
+  tmux send-keys -t "$target" q
+  for _ in {1..30}; do
+    [[ -f "$dir/exit.out" ]] && break
+    sleep 0.1
+  done
+  assert_eq "" "$(cat "$dir/inbox.out" 2>/dev/null || true)" \
+    "orch-tui mark-read requires explicit confirmation"
+  rm -rf "$dir" "$bin_dir"
+  export PATH="$orig_path"
+  cleanup_tui_tmux
 }
 
 # ── tmux readiness poll ──────────────────────────────────────────────────
@@ -960,6 +1390,18 @@ test_preflight() {
 
   dir=$(mktemp -d)
   export ORCH_PROJECT="$dir"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init missing-pf >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder codex missing-pf:0.0 >/dev/null
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-preflight" --repair 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-preflight --repair exits cleanly when tmux session is missing"
+  assert_contains "$out" "run orch-restore" "orch-preflight --repair points missing session to orch-restore"
+  assert_eq "coder-1" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" exists coder-1 && echo coder-1)" \
+    "orch-preflight --repair keeps active roster entries when session is missing"
+  rm -rf "$dir"
+
+  dir=$(mktemp -d)
+  export ORCH_PROJECT="$dir"
   bash "$ORCHESTRATION_HOME/lib/roster.sh" init pf >/dev/null
   tmux new-session -d -s pf -c "$dir" -x 100 -y 30
   tmux split-window -h -t pf:0.0 -c "$dir"
@@ -983,6 +1425,209 @@ test_preflight() {
   cleanup_preflight_tmux
 }
 
+# ── orch-restore ────────────────────────────────────────────────────────
+test_restore() {
+  printf "\n\033[1morch-restore\033[0m\n"
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf "  \033[33m—\033[0m restore skipped (tmux not installed)\n"
+    return 0
+  fi
+
+  local real_tmux; real_tmux=$(command -v tmux)
+  local bin_dir; bin_dir=$(mktemp -d)
+  local sock="$bin_dir/tmux.sock"
+  printf '#!/bin/bash\nif [[ "$1" == "-CC" ]]; then echo "TMUX_CC $*"; exit 0; fi\nexec "%s" -S "%s" "$@"\n' "$real_tmux" "$sock" > "$bin_dir/tmux"
+  chmod +x "$bin_dir/tmux"
+  local orig_path="$PATH"
+  export PATH="$bin_dir:$PATH"
+
+  cleanup_restore_tmux() {
+    export PATH="$orig_path"
+    command tmux -S "$sock" kill-server 2>/dev/null || true
+    rm -rf "$bin_dir"
+  }
+
+  local dir; dir=$(mktemp -d)
+  export ORCH_PROJECT="$dir"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init restore-smoke >/dev/null
+  mkdir -p "$dir/.agents/prompts"
+  printf 'RESTORE_MARKER_ORCH\n' > "$dir/.agents/prompts/orchestrator.md"
+  printf 'RESTORE_MARKER_CODER\n' > "$dir/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add orchestrator orchestrator none restore-smoke:0.99 >/dev/null
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder none restore-smoke:1.99 >/dev/null
+
+  local out rc
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-restore exits cleanly after tmux session loss"
+  assert_contains "$out" "restore complete: restored=2" "orch-restore reports restored panes"
+
+  local orch_target coder_target orch_meta coder_meta orch_capture coder_capture
+  orch_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target orchestrator)
+  coder_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target coder-1)
+  orch_meta=$(tmux display-message -p -t "$orch_target" '#{@orch_agent_id}' 2>/dev/null || true)
+  coder_meta=$(tmux display-message -p -t "$coder_target" '#{@orch_agent_id}' 2>/dev/null || true)
+  assert_eq "orchestrator" "$orch_meta" "orch-restore sets orchestrator pane metadata"
+  assert_eq "coder-1" "$coder_meta" "orch-restore sets coder pane metadata"
+
+  orch_capture=$(tmux capture-pane -p -t "$orch_target" 2>/dev/null || true)
+  coder_capture=$(tmux capture-pane -p -t "$coder_target" 2>/dev/null || true)
+  assert_contains "$orch_capture" "RESTORE_MARKER_ORCH" "orch-restore reuses existing orchestrator prompt"
+  assert_contains "$coder_capture" "RESTORE_MARKER_CODER" "orch-restore reuses existing coder prompt"
+
+  local coder_window_target
+  coder_window_target="${coder_target%.*}"
+  tmux select-pane -t "$coder_target"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" retarget coder-1 "$coder_window_target.99" >/dev/null
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-restore exits cleanly with same-session stale target"
+  assert_eq "$coder_target" "$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target coder-1)" \
+    "orch-restore canonicalizes same-session stale target"
+
+  coder_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target coder-1)
+  tmux set-option -p -t "$coder_target" @orch_agent_id "" 2>/dev/null || true
+  tmux send-keys -t "$coder_target" "tail -f /dev/null" Enter
+  local tries=0
+  while (( tries < 30 )); do
+    if [[ "$(tmux display-message -p -t "$coder_target" '#{pane_current_command}' 2>/dev/null)" == "tail" ]]; then
+      break
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  rc=0
+  out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach 2>&1) || rc=$?
+  if (( rc != 0 )); then
+    pass "orch-restore refuses to duplicate occupied untagged roster target"
+  else
+    fail "orch-restore must refuse occupied untagged roster target"
+  fi
+  assert_contains "$out" "Refusing to duplicate" \
+    "orch-restore explains occupied untagged target refusal"
+
+  local dir_flags
+  dir_flags=$(mktemp -d)
+  export ORCH_PROJECT="$dir_flags"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init restore-flags >/dev/null
+  mkdir -p "$dir_flags/.agents/prompts"
+  printf 'RESTORE_FLAGS\n' > "$dir_flags/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder none restore-flags:0.99 >/dev/null
+  rc=0
+  out=$(cd "$dir_flags" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --iterm-cc --no-attach 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-restore parses --iterm-cc --no-attach"
+  assert_not_contains "$out" "TMUX_CC" "orch-restore --no-attach cancels prior --iterm-cc"
+  tmux kill-session -t restore-flags 2>/dev/null || true
+  rm -rf "$dir_flags"
+
+  dir_flags=$(mktemp -d)
+  export ORCH_PROJECT="$dir_flags"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init restore-flags >/dev/null
+  mkdir -p "$dir_flags/.agents/prompts"
+  printf 'RESTORE_FLAGS\n' > "$dir_flags/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder none restore-flags:0.99 >/dev/null
+  rc=0
+  out=$(cd "$dir_flags" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach -CC 2>&1) || rc=$?
+  assert_eq "0" "$rc" "orch-restore parses --no-attach -CC"
+  assert_contains "$out" "TMUX_CC -CC attach-session -t restore-flags" \
+    "orch-restore -CC wins when it is the last presentation flag"
+  tmux kill-session -t restore-flags 2>/dev/null || true
+  rm -rf "$dir_flags"
+
+  local dir_resume claude_resume resume_target resume_capture resume_capture_flat codex_resume
+  dir_resume=$(mktemp -d)
+  export ORCH_PROJECT="$dir_resume"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init resume-claude >/dev/null
+  ORCH_TOTAL_AGENTS=1 ORCH_CLI_READY_MAX=1 ORCH_KICKOFF_FALLBACK_ENTER=0 ORCH_LAUNCH_ECHO_ONLY=1 \
+    bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" claude-1 coder claude --session resume-claude >/dev/null
+  claude_resume=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" resume claude-1 | jq -r '.id // ""')
+  if [[ "$claude_resume" =~ ^[0-9a-f-]{36}$ ]]; then
+    pass "spawn-agent stores generated Claude resume id"
+  else
+    fail "spawn-agent stores generated Claude resume id"
+  fi
+  resume_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target claude-1)
+  resume_capture=$(tmux capture-pane -p -t "$resume_target" 2>/dev/null || true)
+  assert_contains "$resume_capture" "ORCH_LAUNCH_CMD: claude --session-id '$claude_resume'" \
+    "spawn-agent starts Claude with stored session id"
+  tmux kill-session -t resume-claude 2>/dev/null || true
+  ORCH_CLI_READY_MAX=1 ORCH_KICKOFF_FALLBACK_ENTER=0 ORCH_LAUNCH_ECHO_ONLY=1 \
+    bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach >/dev/null
+  resume_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target claude-1)
+  resume_capture=$(tmux capture-pane -p -t "$resume_target" 2>/dev/null || true)
+  assert_contains "$resume_capture" "ORCH_LAUNCH_CMD: claude --resume '$claude_resume'" \
+    "orch-restore resumes Claude with stored session id"
+  tmux kill-session -t resume-claude 2>/dev/null || true
+  rm -rf "$dir_resume"
+
+  dir_resume=$(mktemp -d)
+  export ORCH_PROJECT="$dir_resume"
+  codex_resume="019de80b-e52e-7682-a818-a17496aa0140"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init resume-codex >/dev/null
+  mkdir -p "$dir_resume/.agents/prompts"
+  printf 'CODEX_RESUME\n' > "$dir_resume/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder codex resume-codex:0.99 \
+    --resume-provider codex --resume-id "$codex_resume" --resume-mode exact >/dev/null
+  ORCH_CLI_READY_MAX=1 ORCH_CODEX_GATE_MAX=1 ORCH_LAUNCH_ECHO_ONLY=1 \
+    bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach >/dev/null
+  resume_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target coder-1)
+  resume_capture=$(tmux capture-pane -p -t "$resume_target" 2>/dev/null || true)
+  assert_contains "$resume_capture" "ORCH_LAUNCH_CMD: codex resume --no-alt-screen" \
+    "orch-restore resumes Codex when exact resume id is stored"
+  resume_capture_flat=$(printf "%s" "$resume_capture" | tr -d '\n')
+  assert_contains "$resume_capture_flat" "$codex_resume" \
+    "orch-restore includes stored Codex resume id"
+  tmux kill-session -t resume-codex 2>/dev/null || true
+  rm -rf "$dir_resume"
+
+  local dir_concurrent pid1 pid2 rc1 rc2 pane_count
+  dir_concurrent=$(mktemp -d)
+  export ORCH_PROJECT="$dir_concurrent"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init restore-concurrent >/dev/null
+  mkdir -p "$dir_concurrent/.agents/prompts"
+  printf 'CONCURRENT_RESTORE\n' > "$dir_concurrent/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder none restore-concurrent:0.99 >/dev/null
+  tmux new-session -d -s restore-concurrent -c "$dir_concurrent"
+  (cd "$dir_concurrent" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach > "$dir_concurrent/out1" 2>&1) & pid1=$!
+  (cd "$dir_concurrent" && bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach > "$dir_concurrent/out2" 2>&1) & pid2=$!
+  rc1=0; wait "$pid1" || rc1=$?
+  rc2=0; wait "$pid2" || rc2=$?
+  assert_eq "0" "$rc1" "concurrent orch-restore first process exits cleanly"
+  assert_eq "0" "$rc2" "concurrent orch-restore second process exits cleanly"
+  pane_count=$(tmux list-panes -t restore-concurrent -F '#{@orch_agent_id}' 2>/dev/null \
+    | awk '$0 == "coder-1" { n++ } END { print n + 0 }')
+  assert_eq "1" "$pane_count" "concurrent orch-restore does not duplicate live agent panes"
+  tmux kill-session -t restore-concurrent 2>/dev/null || true
+  rm -rf "$dir_concurrent"
+
+  local dir_fail
+  printf '#!/usr/bin/env bash\nexit 42\n' > "$bin_dir/codex"
+  chmod +x "$bin_dir/codex"
+  dir_fail=$(mktemp -d)
+  export ORCH_PROJECT="$dir_fail"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" init resume-fail >/dev/null
+  mkdir -p "$dir_fail/.agents/prompts"
+  printf 'CODEX_FAIL\n' > "$dir_fail/.agents/prompts/coder-1.md"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" add coder-1 coder codex resume-fail:0.99 \
+    --resume-provider codex --resume-id bad-resume-id --resume-mode exact >/dev/null
+  rc=0
+  out=$(cd "$dir_fail" && ORCH_CLI_READY_MAX=1 ORCH_CODEX_GATE_MAX=1 \
+    bash "$ORCHESTRATION_HOME/bin/orch-restore" --no-attach 2>&1) || rc=$?
+  if (( rc != 0 )); then
+    pass "orch-restore fails when resumed Codex CLI is not ready"
+  else
+    fail "orch-restore should fail when resumed Codex CLI is not ready"
+  fi
+  assert_contains "$out" "Codex prompt/trust detection timed out" \
+    "orch-restore reports resumed Codex readiness failure"
+  tmux kill-session -t resume-fail 2>/dev/null || true
+  rm -rf "$dir_fail"
+
+  rm -rf "$dir"
+  cleanup_restore_tmux
+}
+
 # ── run ──────────────────────────────────────────────────────────────────
 SUITE="${1:-all}"
 case "$SUITE" in
@@ -995,12 +1640,14 @@ case "$SUITE" in
   model-select) test_model_select ;;
   enforce)      test_enforce ;;
   preflight)    test_preflight ;;
+  restore)      test_restore ;;
   present-session) test_present_session ;;
   pattern-defaults) test_pattern_defaults ;;
   tmux-send)    test_tmux_send_helpers ;;
+  tui)          test_tui ;;
   spawn-layout) test_spawn_layout ;;
   protocol-notify-tmux) test_protocol_notify_tmux ;;
-  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_present_session; test_pattern_defaults; test_tmux_send_helpers; test_spawn_layout; test_tmux_ready ;;
+  all)          test_roster; test_protocol; test_protocol_notify_tmux; test_tasks; test_concurrency; test_end_session; test_model_select; test_enforce; test_preflight; test_restore; test_present_session; test_pattern_defaults; test_tmux_send_helpers; test_tui; test_spawn_layout; test_tmux_ready ;;
   *) echo "unknown suite: $SUITE"; exit 2 ;;
 esac
 

@@ -18,6 +18,24 @@ orch-status --follow
 
 If pane is at shell prompt, the CLI likely exited; restart CLI in that pane and resend pending instructions.
 
+## Tmux session closed or killed
+
+If `<project>/.agents/roster.json` still exists, rebuild the missing panes:
+
+```bash
+orch-restore
+```
+
+This keeps durable state (`.agents/inbox`, `.agents/tasks.json`, `.agents/status.md`). If exact resume metadata exists in `.agents/roster.json`, it resumes the saved model chat; otherwise it relaunches each active agent from its saved prompt file.
+
+Check resume metadata:
+
+```bash
+bash "$ORCHESTRATION_HOME/lib/roster.sh" resume <agent-id>
+```
+
+Use `orch-restore` when you want panes recreated. `orch-preflight --repair` is for validating state and retargeting live panes; when the whole tmux session is missing it now leaves active roster entries untouched and points you here.
+
 ## Message queued but not visible in pane
 
 This is usually a tmux target/notify issue. Check:

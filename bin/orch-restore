@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# orch-restore — rebuild missing tmux panes from the current .agents roster.
+#
+# Usage:
+#   orch-restore
+#   orch-restore --attach
+#   orch-restore --iterm-cc | --cc | -CC
+#   orch-restore --switch-client
+#   orch-restore --no-attach
+#   ORCH_PROJECT=/path/to/project orch-restore
+#
+# When exact resume metadata is present in the roster, this resumes the saved
+# model chat. Otherwise it recreates the pane/CLI process from the saved prompt,
+# keeps inbox/task state, and retargets active roster entries.
+# Use this when the tmux session is missing and .agents still exists. Use
+# orch-preflight --repair after panes are live again or when only targets are
+# stale.
+
+set -euo pipefail
+
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+source "$ORCHESTRATION_HOME/lib/common.sh"
+source "$ORCHESTRATION_HOME/lib/tmux-helpers.sh"
+
+require_cmd jq
+require_cmd tmux
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --attach)
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=1
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
+    --iterm-cc|--cc|-CC)
+      export ORCH_AUTO_ATTACH_ITERM_CC=1
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
+    --switch-client|--switch)
+      export ORCH_AUTO_SWITCH_IN_TMUX=1
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      shift
+      ;;
+    --no-attach)
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
+    -h|--help)
+      awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+      exit 0
+      ;;
+    *)
+      die "unknown flag: $1"
+      ;;
+  esac
+done
+
+ROSTER="$(roster_file)"
+[[ -f "$ROSTER" ]] || die "no active .agents roster at $ROSTER"
+jq empty "$ROSTER" >/dev/null 2>&1 || die "roster is not valid JSON: $ROSTER"
+
+SESSION=$(jq -r '.session // ""' "$ROSTER")
+[[ -n "$SESSION" && "$SESSION" != "null" ]] || die "roster has no session name"
+
+ACTIVE_COUNT=$(jq '[.agents[] | select(.status=="active")] | length' "$ROSTER")
+[[ "$ACTIVE_COUNT" -gt 0 ]] || die "roster has no active agents to restore"
+
+export ORCH_TOTAL_AGENTS="$ACTIVE_COUNT"
+
+canonical_live_target_for_agent() {
+  local id="$1" target="$2"
+  local meta canon
+  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
+  meta=$(tmux display-message -p -t "$target" '#{@orch_agent_id}' 2>/dev/null || true)
+  [[ "$meta" == "$id" ]] || return 1
+  canon=$(tmux display-message -p -t "$target" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+  [[ -n "$canon" ]] || return 1
+  printf "%s\n" "$canon"
+}
+
+roster_target_unsafe_occupied() {
+  local target="$1"
+  local meta
+  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1 || return 1
+  meta=$(tmux display-message -p -t "$target" '#{@orch_agent_id}' 2>/dev/null || true)
+  [[ -z "$meta" ]] || return 1
+  ! is_shell_pane "$target"
+}
+
+find_live_agent_target() {
+  local id="$1"
+  tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}	#{@orch_agent_id}' 2>/dev/null \
+    | awk -F'\t' -v id="$id" '$2 == id { print $1 }'
+}
+
+info "restore project: $(project_root)"
+info "restore session: $SESSION"
+init_session "$SESSION" >/dev/null
+
+restored=0
+kept=0
+retargeted=0
+
+while IFS= read -r agent; do
+  id=$(jq -r '.id' <<< "$agent")
+  role=$(jq -r '.role' <<< "$agent")
+  model=$(jq -r '.model' <<< "$agent")
+  target=$(jq -r '.target // ""' <<< "$agent")
+  hats=$(jq -r '(.hats // []) | join(",")' <<< "$agent")
+  parent=$(jq -r '.parent // empty' <<< "$agent")
+
+  if [[ -n "$target" ]]; then
+    live_target=$(canonical_live_target_for_agent "$id" "$target" || true)
+    if [[ -n "$live_target" ]]; then
+      if [[ "$live_target" != "$target" ]]; then
+        bash "$ORCHESTRATION_HOME/lib/roster.sh" retarget "$id" "$live_target" >/dev/null
+        ok "canonicalized live pane: $id $target -> $live_target"
+        retargeted=$((retargeted+1))
+      else
+        ok "already live: $id -> $target"
+        kept=$((kept+1))
+      fi
+      continue
+    fi
+    if roster_target_unsafe_occupied "$target"; then
+      die "roster target for $id is occupied but lacks @orch_agent_id metadata: $target. Refusing to duplicate a possible live agent; run orch-preflight --repair or retarget/remove the agent manually."
+    fi
+  fi
+
+  live_targets=$(find_live_agent_target "$id" | sed '/^$/d')
+  live_count=$(printf "%s\n" "$live_targets" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [[ "$live_count" == "1" ]]; then
+    new_target=$(printf "%s\n" "$live_targets" | sed -n '1p')
+    bash "$ORCHESTRATION_HOME/lib/roster.sh" retarget "$id" "$new_target" >/dev/null
+    ok "retargeted live pane: $id -> $new_target"
+    retargeted=$((retargeted+1))
+    continue
+  elif [[ "$live_count" != "0" ]]; then
+    warn "ambiguous live panes for $id; spawning a replacement"
+  fi
+
+  args=("$id" "$role" "$model" "--restore-existing" "--session" "$SESSION")
+  [[ -n "$hats" ]] && args+=("--hats" "$hats")
+  [[ -n "$parent" ]] && args+=("--parent" "$parent")
+  bash "$ORCHESTRATION_HOME/lib/spawn-agent.sh" "${args[@]}" >/dev/null
+  new_target=$(bash "$ORCHESTRATION_HOME/lib/roster.sh" target "$id")
+  ok "restored pane: $id -> $new_target"
+  restored=$((restored+1))
+done < <(jq -rc '.agents[] | select(.status=="active")' "$ROSTER")
+
+ok "restore complete: restored=$restored retargeted=$retargeted already_live=$kept"
+present_session "$SESSION"

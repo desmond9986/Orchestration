@@ -108,16 +108,27 @@ wait_for_shell_input_ready() {
   local target="$1"
   local max_ms="${2:-${ORCH_SHELL_READY_MAX_MS:-2000}}"
   local poll_ms="${3:-${ORCH_SHELL_READY_POLL_MS:-50}}"
+  local need_stable="${ORCH_SHELL_READY_STABLE:-3}"
   [[ "$max_ms" =~ ^[0-9]+$ ]] || max_ms=2000
   [[ "$poll_ms" =~ ^[0-9]+$ ]] || poll_ms=50
-  local start_ms now_ms sleep_s output
+  [[ "$need_stable" =~ ^[0-9]+$ ]] || need_stable=3
+  local start_ms now_ms sleep_s output h last_h="" streak=0
   start_ms=$(( $(date +%s) * 1000 ))
   sleep_s=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms/1000 }')
   while :; do
     if is_shell_pane "$target"; then
-      output=$(tmux capture-pane -p -t "$target" 2>/dev/null | tr -d '[:space:]')
+      output=$(tmux capture-pane -p -t "$target" 2>/dev/null)
       if [[ -n "$output" ]]; then
-        return 0
+        h=$(printf "%s" "$output" | "${_PANE_HASH[@]}" | awk '{print $1}')
+        if [[ -n "$h" && "$h" == "$last_h" ]]; then
+          streak=$((streak + 1))
+          if (( streak >= need_stable )); then
+            return 0
+          fi
+        else
+          last_h="$h"
+          streak=1
+        fi
       fi
     fi
     now_ms=$(( $(date +%s) * 1000 ))
@@ -432,7 +443,11 @@ wait_for_codex_prompt_or_gate() {
 present_session() {
   local session="$1"
   if [[ -n "${TMUX:-}" ]]; then
-    if [[ "${ORCH_AUTO_SWITCH_IN_TMUX:-0}" == "1" ]]; then
+    if [[ "${ORCH_AUTO_ATTACH_ITERM_CC:-0}" == "1" ]]; then
+      info "session '$session' ready"
+      info "iTerm tmux control mode must be started outside tmux"
+      info "run outside tmux: tmux -CC attach-session -t '$session'"
+    elif [[ "${ORCH_AUTO_SWITCH_IN_TMUX:-0}" == "1" ]]; then
       tmux switch-client -t "$session" 2>/dev/null || true
     else
       info "session '$session' ready"
@@ -440,11 +455,14 @@ present_session() {
       info "or press Ctrl-B, S to pick a session"
     fi
   else
-    if [[ "${ORCH_AUTO_ATTACH_OUTSIDE_TMUX:-0}" == "1" ]]; then
+    if [[ "${ORCH_AUTO_ATTACH_ITERM_CC:-0}" == "1" ]]; then
+      tmux -CC attach-session -t "$session"
+    elif [[ "${ORCH_AUTO_ATTACH_OUTSIDE_TMUX:-0}" == "1" ]]; then
       tmux attach-session -t "$session"
     else
       info "session '$session' ready"
       info "attach with: tmux attach-session -t '$session'"
+      info "iTerm control mode: tmux -CC attach-session -t '$session'"
     fi
   fi
 }

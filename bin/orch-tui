@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# orch-tui - full-screen terminal control panel for orchestration.
+#
+# Usage:
+#   orch-tui              # full-screen interactive TUI
+#   orch-tui --snapshot   # print one dashboard snapshot and exit
+#   orch-tui --help
+#
+# Interactive mode uses Python curses for a full-window UI with mouse/click
+# support. Snapshot mode stays shell-only for scripts/tests.
+#
+# Design rule:
+#   This is a thin control surface. It reads .agents state for display and
+#   shells out to existing orchestration commands for actions.
+
+set -euo pipefail
+: "${ORCHESTRATION_HOME:=$HOME/orchestration}"
+export ORCHESTRATION_HOME
+source "$ORCHESTRATION_HOME/lib/common.sh"
+
+usage() { awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+export ORCH_PROJECT="$PWD"
+
+has_session() {
+  [[ -f "$(roster_file)" ]] && jq empty "$(roster_file)" >/dev/null 2>&1
+}
+
+session_name() {
+  jq -r '.session // ""' "$(roster_file)" 2>/dev/null || true
+}
+
+active_count() {
+  jq '[.agents[]? | select(.status=="active")] | length' "$(roster_file)" 2>/dev/null || echo 0
+}
+
+unread_count() {
+  local total=0 f n
+  for f in "$(inbox_dir)"/*.jsonl; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == *.archive.jsonl ]] && continue
+    n=$(jq -s '[.[] | select(.read == false)] | length' "$f" 2>/dev/null || echo 0)
+    total=$((total + n))
+  done
+  echo "$total"
+}
+
+task_counts() {
+  local file="$(agents_dir)/tasks.json"
+  if [[ ! -f "$file" ]]; then
+    echo "tasks: none"
+    return 0
+  fi
+  jq -r '
+    def count_status($s): [.tasks[]? | select(.status==$s)] | length;
+    "tasks: pending=\(count_status("pending")) claimed=\(count_status("claimed")) blocked=\(count_status("blocked")) done=\(count_status("done"))"
+  ' "$file" 2>/dev/null || echo "tasks: unreadable"
+}
+
+print_snapshot() {
+  printf "orchestration tui\n"
+  printf "project: %s\n" "$(project_root)"
+  printf "agents dir: %s\n" "$(agents_dir)"
+  if ! has_session; then
+    printf "session: none\n"
+    printf "state: no active .agents/roster.json here\n"
+    return 0
+  fi
+
+  printf "session: %s\n" "$(session_name)"
+  printf "active agents: %s\n" "$(active_count)"
+  printf "unread inbox messages: %s\n" "$(unread_count)"
+  printf "%s\n" "$(task_counts)"
+  printf "\nAgents:\n"
+  bash "$ORCHESTRATION_HOME/lib/roster.sh" list-active 2>/dev/null || printf "(unable to read roster)\n"
+  printf "\nRecent status:\n"
+  tail -8 "$(status_file)" 2>/dev/null || printf "(none)\n"
+}
+
+run_interactive() {
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    die "interactive orch-tui requires a terminal. Use 'orch-tui --snapshot' for non-interactive output."
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "interactive orch-tui requires python3 (snapshot mode does not)"
+  fi
+  exec python3 "$ORCHESTRATION_HOME/lib/orch_tui.py"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --snapshot) print_snapshot; exit 0 ;;
+  "") run_interactive ;;
+  *) die "unknown option: $1 (try: orch-tui --help)" ;;
+esac

@@ -9,7 +9,7 @@
 
 ## Priority 1 (Operator Experience)
 
-- Guided control plane (`orch ui`) for launch, assignment, monitoring, and teardown.
+- Expand `orch-tui` for launch, assignment, monitoring, and teardown with richer keyboard navigation and guided forms.
 - Command-palette style flows for common actions (spawn, assign, retarget, unblock).
 - Safer defaults and clearer one-shot “dangerous mode” behavior.
 

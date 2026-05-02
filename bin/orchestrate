@@ -10,10 +10,12 @@
 # Flags (must come before the pattern name):
 #   --yolo                         skip model-choice prompts, use each pattern's role defaults (does not bypass permissions)
 #   --dangerously-skip-permissions pass permission-bypass flags to each spawned CLI
-#                                  (claude --dangerously-skip-permissions, codex --yolo)
+#                                  (claude --dangerously-skip-permissions,
+#                                   codex --dangerously-bypass-approvals-and-sandbox)
 #   --respect-env-skip-permissions keep ORCH_SKIP_PERMISSIONS* env overrides as-is
 #   --switch-client                when already inside tmux, switch to the new session
 #   --attach                       outside tmux, attach to the new session
+#   --iterm-cc | -CC               outside tmux, attach using iTerm2 tmux control mode
 #   --no-attach                    outside tmux, print attach command (default)
 #
 # Examples:
@@ -22,6 +24,7 @@
 #   orchestrate --yolo lean             # skip prompts, use defaults
 #   orchestrate --switch-client lean    # switch current tmux client after launch
 #   orchestrate --attach lean           # attach when launched outside tmux
+#   orchestrate --iterm-cc lean         # attach with iTerm2 tmux control mode
 #   orchestrate --respect-env-skip-permissions lean
 #   orchestrate swarm 4                 # swarm with 4 coders
 #   orchestrate freeform                # empty session, add agents manually
@@ -138,9 +141,30 @@ while [[ $# -gt 0 ]]; do
     --yolo|-y) YOLO=1; shift ;;
     --dangerously-skip-permissions) export ORCH_SKIP_PERMISSIONS=1; shift ;;
     --respect-env-skip-permissions) RESPECT_ENV_SKIP=1; shift ;;
-    --switch-client|--switch) export ORCH_AUTO_SWITCH_IN_TMUX=1; shift ;;
-    --attach) export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=1; shift ;;
-    --no-attach) export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0; shift ;;
+    --switch-client|--switch)
+      export ORCH_AUTO_SWITCH_IN_TMUX=1
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      shift
+      ;;
+    --attach)
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=1
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
+    --iterm-cc|--cc|-CC)
+      export ORCH_AUTO_ATTACH_ITERM_CC=1
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
+    --no-attach)
+      export ORCH_AUTO_ATTACH_OUTSIDE_TMUX=0
+      export ORCH_AUTO_ATTACH_ITERM_CC=0
+      export ORCH_AUTO_SWITCH_IN_TMUX=0
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     recommend) cmd_recommend; exit 0 ;;
     list)
