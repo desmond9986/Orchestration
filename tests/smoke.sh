@@ -762,6 +762,42 @@ test_tui() {
   out=$(cd "$dir" && bash "$ORCHESTRATION_HOME/bin/orch-tui" --snapshot 2>&1)
   assert_contains "$out" "session: none" "orch-tui snapshot handles project without session"
   assert_contains "$out" "no active .agents/roster.json" "orch-tui snapshot explains missing roster"
+
+  out=$(ORCHESTRATION_HOME="$ORCHESTRATION_HOME" ORCH_PROJECT="$dir" PYTHONPATH="$ORCHESTRATION_HOME" python3 - <<'PY'
+from lib.orch_tui import App
+
+app = object.__new__(App)
+app.section_index = 0
+app.row_index = 0
+app.filters = {}
+
+state = app.state()
+rows = app.current_rows(state)
+print("has_session:" + str(state["has_session"]))
+print("has_roster:" + str(state["has_roster"]))
+print("first_run:" + str(state["first_run"]))
+print("rows:" + str(len(rows)))
+for row in rows:
+    print("row:" + str(row.get("title", "")) + "|" + str(row.get("value", "")))
+for line in app.inspector_lines(state, rows, 120):
+    print(line)
+app.output = []
+app.message = ""
+app.restore_panes()
+print("restore_guard:" + app.message)
+PY
+)
+  assert_contains "$out" "row:Session bootstrap|No active session." \
+    "orch-tui session rows include bootstrap guidance when no roster"
+  assert_contains "$out" "first_run:True" \
+    "orch-tui detects first-run projects with no roster"
+  assert_contains "$out" "Pick this pattern and run Start selected to bootstrap a new session." \
+    "orch-tui session inspector suggests start selected first-run"
+  assert_contains "$out" "Restore panes is only available when .agents/roster.json exists." \
+    "orch-tui session inspector explains restore limitation"
+  assert_contains "$out" "restore_guard:restore unavailable: no .agents/roster.json" \
+    "orch-tui restore action is guarded when no roster exists"
+
   rm -rf "$dir"
 
   dir=$(mktemp -d)
@@ -776,10 +812,123 @@ test_tui() {
   assert_contains "$out" "active agents: 1" "orch-tui snapshot shows active agent count"
   assert_contains "$out" "unread inbox messages: 1" "orch-tui snapshot shows unread inbox count"
   assert_contains "$out" "coder-1" "orch-tui snapshot includes roster agent"
+
+  out=$(ORCHESTRATION_HOME="$ORCHESTRATION_HOME" ORCH_PROJECT="$dir" PYTHONPATH="$ORCHESTRATION_HOME" python3 - <<'PY'
+from lib.orch_tui import App
+
+app = object.__new__(App)
+app.section_index = 1
+app.row_index = 0
+app.filters = {}
+state = app.state()
+rows = app.current_rows(state)
+print("unread_total:" + str(state["unread"]))
+print("agent_unread:" + str(state["agent_unread"].get("coder-1", 0)))
+if rows:
+    print("agent_row:" + str(rows[0].get("title", "") + "|" + str(rows[0].get("value", ""))))
+    print("agent_status:" + str(rows[0].get("status", "")))
+for line in app.inspector_lines(state, rows, 120):
+    print(line)
+PY
+)
+  assert_contains "$out" "agent_unread:1" "orch-tui computes per-agent unread totals"
+  assert_contains "$out" "agent_row:coder-1|coder | none | unread 1 | tui-smoke:0.0" \
+    "orch-tui agents row includes per-agent unread count"
+  assert_contains "$out" "agent_status:warn" "orch-tui agents with unread messages are highlighted"
+  assert_contains "$out" "unread: 1" "orch-tui agent inspector shows per-agent unread count"
   rm -rf "$dir"
 
   out=$(bash "$ORCHESTRATION_HOME/bin/orch-tui" --help 2>&1)
   assert_contains "$out" "thin control surface" "orch-tui help states wrapper design rule"
+
+  out=$(ORCHESTRATION_HOME="$ORCHESTRATION_HOME" PYTHONPATH="$ORCHESTRATION_HOME" python3 - <<'PY'
+import lib.orch_tui as tui
+from lib.orch_tui import Action, App, ClickZone
+app = object.__new__(App)
+fields = app.launch_form_fields("lean")
+fields[0].value = "review-loop"
+refreshed, selected = app.refresh_launch_form_fields(fields, 0)
+print("selected", selected)
+print("keys", " ".join(field.key for field in refreshed))
+
+clicked = {"count": 0}
+def cb():
+    clicked["count"] += 1
+
+zone = ClickZone(2, 4, 3, 10, cb, "row")
+print("contains_inside:" + str(zone.contains(2, 4)))
+print("contains_outside:" + str(zone.contains(4, 4)))
+app.click_zones = [zone]
+app.message = ""
+original_getmouse = tui.curses.getmouse
+tui.curses.getmouse = lambda: (0, 6, 3, 0, 0)
+app.handle_mouse()
+print("motion_only_clicked:" + str(clicked["count"]))
+tui.curses.getmouse = lambda: (0, 6, 3, 0, tui.curses.BUTTON1_PRESSED)
+app.handle_mouse()
+print("pressed_clicked:" + str(clicked["count"]))
+tui.curses.getmouse = lambda: (0, 6, 3, 0, tui.curses.BUTTON1_RELEASED)
+app.handle_mouse()
+print("released_clicked:" + str(clicked["count"]))
+tui.curses.getmouse = lambda: (0, 6, 3, 0, tui.curses.BUTTON1_CLICKED)
+app.handle_mouse()
+tui.curses.getmouse = original_getmouse
+print("mouse_clicked:" + str(clicked["count"]))
+print("mouse_message:" + app.message)
+print("button_label:" + app.action_button_label(Action("Run", lambda _app: None, risk="mutating"), ">"))
+
+class FakeScreen:
+    def __init__(self):
+        self.lines = []
+    def getmaxyx(self):
+        return (42, 150)
+    def addstr(self, y, x, value, attr=0):
+        self.lines.append(str(value))
+    def move(self, y, x):
+        pass
+
+fake = FakeScreen()
+app.stdscr = fake
+original_color_pair = tui.curses.color_pair
+tui.curses.color_pair = lambda _idx: 0
+app.draw_form_overlay(
+    42,
+    150,
+    "Unit Form",
+    [tui.FormField("name", "Name", "", "required", True)],
+    0,
+    "Missing required: Name",
+    lambda values: ["$ unit-preview"],
+)
+tui.curses.color_pair = original_color_pair
+print("form_footer:" + str(any("[Enter Edit/Save] [s Submit]" in line for line in fake.lines)))
+print("form_required:" + str(any("REQUIRED" in line for line in fake.lines)))
+PY
+)
+  assert_contains "$out" "model_reviewer" \
+    "orch-tui launch form refreshes role fields after pattern edit"
+  assert_not_contains "$out" "model_orchestrator" \
+    "orch-tui launch form removes stale role fields after pattern edit"
+  assert_contains "$out" "contains_inside:True" \
+    "orch-tui click zone includes its bounds"
+  assert_contains "$out" "contains_outside:False" \
+    "orch-tui click zone excludes outside coordinates"
+  assert_contains "$out" "motion_only_clicked:0" \
+    "orch-tui mouse movement does not run click callbacks"
+  assert_contains "$out" "pressed_clicked:0" \
+    "orch-tui mouse press does not run click callbacks before release"
+  assert_contains "$out" "released_clicked:0" \
+    "orch-tui mouse release does not run click callbacks without click event"
+  assert_contains "$out" "mouse_clicked:1" \
+    "orch-tui mouse handler dispatches click zones"
+  assert_contains "$out" "mouse_message:clicked row" \
+    "orch-tui mouse handler records clicked target"
+  assert_contains "$out" "button_label:[> + Run]" \
+    "orch-tui action buttons expose risk and selection markers"
+  assert_contains "$out" "form_footer:True" \
+    "orch-tui form overlay renders fixed controls footer"
+  assert_contains "$out" "form_required:True" \
+    "orch-tui form overlay marks empty required fields"
 
   if ! command -v tmux >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
     printf "  \033[33m—\033[0m skipped full-screen interactive checks (tmux/python3 missing)\n"
@@ -793,6 +942,30 @@ test_tui() {
   cleanup_tui_tmux() {
     unset -f tmux 2>/dev/null || true
     command "$real_tmux" -L "$sock" kill-server 2>/dev/null || true
+  }
+  local tui_key_delay=0.2
+  local tui_wait_delay=0.1
+  local tui_wait_tries=30
+  tui_wait_for_file() {
+    local file="$1" tries="${2:-$tui_wait_tries}" delay="${3:-$tui_wait_delay}"
+    local attempt=0
+    while (( attempt < tries )); do
+      if [[ -f "$file" ]]; then
+        return 0
+      fi
+      sleep "$delay"
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+  tui_send_keys() {
+    local target=$1
+    shift
+    local key
+    for key in "$@"; do
+      tmux send-keys -t "$target" "$key"
+      sleep "$tui_key_delay"
+    done
   }
 
   dir=$(mktemp -d)
@@ -809,25 +982,10 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/args.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" /
-  sleep 0.2
-  tmux send-keys -t "$target" "swarm" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" l
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" "*" Enter
-  sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" / "swarm" Enter l Enter j j Enter "*" Enter s
+  tui_wait_for_file "$dir/args.out" || fail "orch-tui wait for args output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui wait for tui exit status"
   assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "[--yolo]" \
     "orch-tui selected pattern start uses non-interactive launch flags"
   assert_contains "$(cat "$dir/args.out" 2>/dev/null || true)" "[swarm]" \
@@ -844,6 +1002,29 @@ EOF_STUB
 
   dir=$(mktemp -d)
   bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orchestrate" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orchestrate"
+  sess="tui-first-run-banner-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -x 150 -y 42 -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/banner.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tmux capture-pane -p -t "$target" > "$dir/banner.capture"
+  assert_contains "$(cat "$dir/banner.capture" 2>/dev/null || true)" "Start Here" \
+    "orch-tui first-run screen renders Start Here banner on tall terminals"
+  assert_contains "$(cat "$dir/banner.capture" 2>/dev/null || true)" "Quick actions:" \
+    "orch-tui first-run banner renders quick actions"
+  assert_contains "$(cat "$dir/banner.capture" 2>/dev/null || true)" "Actions (click):" \
+    "orch-tui action bar labels clickable controls"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui first-run banner test waits for tui exit"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
   cat > "$bin_dir/orch-preflight" <<'EOF_STUB'
 #!/usr/bin/env bash
 printf 'preflight:%s\n' "$*" > "$ORCH_TUI_STUB_OUT"
@@ -854,24 +1035,123 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 5
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  for _ in {1..30}; do
-    [[ -f "$dir/task.out" ]] && break
-    sleep 0.1
-  done
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" 5 Enter
+  tui_wait_for_file "$dir/preflight.out" || fail "orch-tui health test waits for preflight output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui health test waits for tui exit status"
   assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "preflight:" \
     "orch-tui full-screen health preflight dispatches existing command"
   assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
     "orch-tui full-screen health exits cleanly"
   rm -rf "$dir"
   rm -rf "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/add-agent" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/add-agent"
+  sess="tui-add-agent-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/add.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tui_send_keys "$target" 2 Enter j Enter C-u "claude" Enter s
+  tui_wait_for_file "$dir/add.out" || fail "orch-tui add-agent test waits for command output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui add-agent test waits for tui exit status"
+  assert_contains "$(cat "$dir/add.out" 2>/dev/null || true)" "[coder]" \
+    "orch-tui add agent form submits default role"
+  assert_contains "$(cat "$dir/add.out" 2>/dev/null || true)" "[claude]" \
+    "orch-tui add agent form submits edited model field"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-send" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-send"
+  mkdir -p "$dir/.agents"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-send","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  sess="tui-send-message-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/send.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tui_send_keys "$target" 3 Enter j j Enter "hello from tui" Enter s
+  tui_wait_for_file "$dir/send.out" || fail "orch-tui send test waits for command output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui send test waits for tui exit status"
+  assert_contains "$(cat "$dir/send.out" 2>/dev/null || true)" "[--type]" \
+    "orch-tui send form dispatches command with type flag"
+  assert_contains "$(cat "$dir/send.out" 2>/dev/null || true)" "[coder-1]" \
+    "orch-tui send form defaults recipient to selected agent id"
+  assert_contains "$(cat "$dir/send.out" 2>/dev/null || true)" "[hello from tui]" \
+    "orch-tui send form dispatches typed payload"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-send" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-send"
+  mkdir -p "$dir/.agents"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-nudge","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  sess="tui-nudge-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/nudge.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tui_send_keys "$target" 2 l Enter s
+  tui_wait_for_file "$dir/nudge.out" || fail "orch-tui nudge test waits for command output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui nudge test waits for tui exit status"
+  assert_contains "$(cat "$dir/nudge.out" 2>/dev/null || true)" "[--type]" \
+    "orch-tui nudge form dispatches command"
+  assert_contains "$(cat "$dir/nudge.out" 2>/dev/null || true)" "[coder-1]" \
+    "orch-tui nudge form defaults to selected agent"
+  assert_contains "$(cat "$dir/nudge.out" 2>/dev/null || true)" "check your inbox now" \
+    "orch-tui nudge form uses default reminder message"
+  rm -rf "$dir" "$bin_dir"
+
+  dir=$(mktemp -d)
+  bin_dir=$(mktemp -d)
+  cat > "$bin_dir/orch-send" <<'EOF_STUB'
+#!/usr/bin/env bash
+printf '[%s]\n' "$@" > "$ORCH_TUI_STUB_OUT"
+EOF_STUB
+  chmod +x "$bin_dir/orch-send"
+  mkdir -p "$dir/.agents/inbox"
+  cat > "$dir/.agents/roster.json" <<EOF_ROSTER
+{"session":"tui-reply","agents":[{"id":"coder-1","role":"coder","model":"codex","target":"tui:0.0","status":"active"}]}
+EOF_ROSTER
+  printf '{"id":"m1","read":false,"from":"coder-2","type":"INFO","payload":"hello"}\n' > "$dir/.agents/inbox/coder-1.jsonl"
+  sess="tui-reply-$$"
+  target="$sess:0.0"
+  tmux new-session -d -s "$sess" -c "$dir" \
+    "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/reply.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
+  sleep 0.5
+  tui_send_keys "$target" 3 l Enter j j Enter "ack via tui" Enter s
+  tui_wait_for_file "$dir/reply.out" || fail "orch-tui reply test waits for command output"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui reply test waits for tui exit status"
+  assert_contains "$(cat "$dir/reply.out" 2>/dev/null || true)" "[--type]" \
+    "orch-tui reply form dispatches command"
+  assert_contains "$(cat "$dir/reply.out" 2>/dev/null || true)" "[coder-2]" \
+    "orch-tui reply form defaults target from selected message"
+  assert_contains "$(cat "$dir/reply.out" 2>/dev/null || true)" "[ack via tui]" \
+    "orch-tui reply form dispatches typed payload"
+  rm -rf "$dir" "$bin_dir"
 
   dir=$(mktemp -d)
   bin_dir=$(mktemp -d)
@@ -885,17 +1165,8 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" :
-  sleep 0.2
-  tmux send-keys -t "$target" "preflight" Enter
-  sleep 0.3
-  tmux send-keys -t "$target" q
-  sleep 0.2
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" : "preflight" Enter q q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui action picker cancel waits for tui exit"
   assert_eq "" "$(cat "$dir/preflight.out" 2>/dev/null || true)" \
     "orch-tui action picker does not auto-run fuzzy match"
   rm -rf "$dir" "$bin_dir"
@@ -912,17 +1183,11 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" :
-  sleep 0.2
-  tmux send-keys -t "$target" "preflight" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
+  tui_send_keys "$target" : "preflight" Enter Enter
   sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/preflight.out" || fail "orch-tui action picker run waits for preflight output"
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui action picker run waits for tui exit"
   assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "preflight:" \
     "orch-tui action picker dispatches selected action"
   rm -rf "$dir" "$bin_dir"
@@ -941,23 +1206,12 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/preflight.out' ORCH_TUI_CANCEL_OUT='$dir/cancel.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 5
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  for _ in {1..30}; do
-    [[ -f "$dir/preflight.out" ]] && break
-    sleep 0.1
-  done
-  tmux send-keys -t "$target" x
-  for _ in {1..30}; do
-    [[ -f "$dir/cancel.out" ]] && break
-    sleep 0.1
-  done
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" 5 Enter
+  tui_wait_for_file "$dir/preflight.out" || fail "orch-tui long-running command starts"
+  tui_send_keys "$target" x
+  tui_wait_for_file "$dir/cancel.out" || fail "orch-tui long-running command cancellation marker"
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui long-running command waits for tui exit"
   assert_contains "$(cat "$dir/preflight.out" 2>/dev/null || true)" "started" \
     "orch-tui starts long-running command in background"
   assert_contains "$(cat "$dir/cancel.out" 2>/dev/null || true)" "terminated" \
@@ -979,13 +1233,10 @@ EOF_TASKS
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 4
+  tui_send_keys "$target" 4
   sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui task tab renders without crashing"
   assert_contains "$(cat "$dir/exit.out" 2>/dev/null || true)" "exit:0" \
     "orch-tui task tab renders without crashing"
   rm -rf "$dir"
@@ -1009,19 +1260,10 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/task.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 4
-  sleep 0.2
-  tmux send-keys -t "$target" l
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
+  tui_send_keys "$target" 4 l Enter Enter
   sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui task action exits"
   assert_contains "$(cat "$dir/task.out" 2>/dev/null || true)" "[show]" \
     "orch-tui task action runs orch-task show"
   assert_contains "$(cat "$dir/task.out" 2>/dev/null || true)" "[t-1]" \
@@ -1049,23 +1291,10 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/owner.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 4
-  sleep 0.2
-  tmux send-keys -t "$target" l l l
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" "done" Enter
+  tui_send_keys "$target" 4 l l l Enter s
   sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui task owner action exits"
   assert_contains "$(cat "$dir/owner.out" 2>/dev/null || true)" "[complete]" \
     "orch-tui complete action dispatches"
   assert_contains "$(cat "$dir/owner.out" 2>/dev/null || true)" "[coder-2]" \
@@ -1091,21 +1320,10 @@ EOF_STUB
   tmux new-session -d -s "$sess" -c "$dir" \
     "ORCHESTRATION_HOME='$ORCHESTRATION_HOME' ORCH_TUI_BIN_HOME='$bin_dir' ORCH_TUI_STUB_OUT='$dir/inbox.out' '$ORCHESTRATION_HOME/bin/orch-tui'; printf 'exit:%s\n' \"\$?\" > '$dir/exit.out'"
   sleep 0.5
-  tmux send-keys -t "$target" 2
-  sleep 0.2
-  tmux send-keys -t "$target" l l l
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
-  sleep 0.2
-  tmux send-keys -t "$target" Enter
+  tui_send_keys "$target" 2 l l l Enter Enter Enter
   sleep 0.5
-  tmux send-keys -t "$target" q
-  for _ in {1..30}; do
-    [[ -f "$dir/exit.out" ]] && break
-    sleep 0.1
-  done
+  tui_send_keys "$target" q
+  tui_wait_for_file "$dir/exit.out" || fail "orch-tui inbox action exits"
   assert_eq "" "$(cat "$dir/inbox.out" 2>/dev/null || true)" \
     "orch-tui mark-read requires explicit confirmation"
   rm -rf "$dir" "$bin_dir"

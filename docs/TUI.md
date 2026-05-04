@@ -48,6 +48,7 @@ Avoid:
 ## Interactive Controls
 
 - `1`-`5` or `Tab`: switch pages.
+- Mouse: click tabs, rows, action buttons, and the output drawer. Hover effects are intentionally disabled because terminal mouse-motion tracking can flicker in tmux/iTerm setups.
 - `j`/`k` or arrow keys: move selected row.
 - In expanded output, `j`/`k` and `PageUp`/`PageDown`: scroll command output.
 - `h`/`l` or left/right arrows: move selected action.
@@ -64,9 +65,32 @@ Avoid:
 
 ## Pattern Launching
 
-The Session page lists the available `patterns/*.sh` entries with descriptions and selection guidance. The default Session action is `Preview launch`; move to `Start selected` when you are ready to start panes, then confirm launch flags and optional pattern args.
+The Session page lists the available `patterns/*.sh` entries with descriptions and selection guidance. New projects with no `.agents/roster.json` show a Start Here banner with the expected flow: choose a pattern, run `Start selected`, then submit the launch form. The default Session action is `Preview launch`; move to `Start selected` when you are ready to start panes.
+
+`Start selected` opens an inline-edit form instead of chained prompts. Use `j`/`k` to move between fields, `Enter`/`e` to edit, `Enter` to save the edited field, `Esc` to cancel field editing, and `s` to submit the form. The form shows:
+
+- selected pattern
+- launch flags before the pattern
+- pattern args after the pattern
+- model override per role
+
+Forms show a fixed footer with the active controls and mark empty required fields with `! REQUIRED`. This is intentionally static; hover effects are not used because terminal mouse-motion tracking can flicker under tmux/iTerm.
 
 The default launch flag is `--yolo` so the TUI can start patterns non-interactively. Pattern files still declare their CLI defaults, many of which are `claude`, but the TUI asks for a model override before launch. That model defaults to `ORCH_TUI_DEFAULT_MODEL`, then `ORCH_DEFAULT_MODEL`, then `codex`. Type `pattern` in the model prompt to keep the pattern file defaults. If you enter attach/control-mode flags such as `--iterm-cc` or `--attach`, the TUI shows the command instead of running it inside curses.
+
+The Agents, Messages, and Tasks pages use the same form behavior for common write actions:
+
+- `Add agent`
+- `Nudge selected`
+- `Send`
+- `Reply`
+- `Broadcast`
+- `Create task`
+- `Claim`
+- `Complete`
+- `Block`
+- `Unblock`
+- `Available for agent`
 
 ## Layout Notes
 

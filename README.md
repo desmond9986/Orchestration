@@ -164,7 +164,7 @@ orch-task unblock <task-id> <agent-id> --note "unblocked"
 
 It is intentionally a thin wrapper: it reads `.agents` state for display and calls existing commands for actions. Missing capabilities should be added as CLI commands first, then surfaced in the TUI.
 
-The default view is an ops-console layout: pages at the top, a large resource viewport, a responsive inspector for the selected row, a contextual action bar, `:` action picker, `/` page filtering, and expandable detail/output panes.
+The default view is an ops-console layout: pages at the top, a large resource viewport, a responsive inspector for the selected row, a contextual action bar, `:` action picker, `/` page filtering, and expandable detail/output panes. New projects show a first-run Start Here banner before the pattern list.
 
 Current screens:
 - Session: browse/filter patterns, preview launch, launch selected pattern, restore, preflight, end session.
@@ -178,9 +178,9 @@ orch-tui             # full-screen clickable terminal UI
 orch-tui --snapshot  # plain text dashboard for scripts/tests
 ```
 
-Useful keys: `1`-`5` switch pages, `j/k` move rows, `h/l` move actions, `Enter` runs, `:` opens the action picker, `?` opens help, `f` expands detail, `e` expands output, and `x` cancels a running command.
+Useful controls: mouse-click tabs, rows, action buttons, and the output drawer when your terminal supports mouse reporting. Hover effects are intentionally disabled because terminal mouse-motion tracking can flicker under tmux/iTerm. Keyboard fallback: `1`-`5` switch pages, `j/k` move rows, `h/l` move actions, `Enter` runs or edits a form field, `s` submits a form, `:` opens the action picker, `?` opens help, `f` expands detail, `e` expands output, and `x` cancels a running command.
 
-From the Session page, preview is the default action. Move to `Start selected` when you are ready to run `orchestrate --yolo <selected-pattern>`. The TUI asks for a model override before launch; it defaults to `ORCH_TUI_DEFAULT_MODEL`, then `ORCH_DEFAULT_MODEL`, then `codex`. Type `pattern` to keep the pattern file defaults. `--yolo` does not bypass permissions; edit the launch-flags prompt if you need other `orchestrate` flags.
+From the Session page, preview is the default action. Move to `Start selected` when you are ready to run `orchestrate --yolo <selected-pattern>`. Launch uses an inline-edit form with pattern, flags, args, and per-role model fields; forms show fixed controls and mark empty required fields. Models default to `ORCH_TUI_DEFAULT_MODEL`, then `ORCH_DEFAULT_MODEL`, then `codex`. Type `pattern` for a role to keep the pattern file default. `--yolo` does not bypass permissions; edit the launch-flags field if you need other `orchestrate` flags.
 
 ## Safety Defaults
 

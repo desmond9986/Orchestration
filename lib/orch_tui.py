@@ -11,6 +11,7 @@ import curses
 import json
 import locale
 import os
+import shutil
 import select
 import shlex
 import subprocess
@@ -43,6 +44,28 @@ class Action:
     risk: str = "safe"
 
 
+@dataclass
+class FormField:
+    key: str
+    label: str
+    value: str = ""
+    hint: str = ""
+    required: bool = False
+
+
+@dataclass
+class ClickZone:
+    y1: int
+    x1: int
+    y2: int
+    x2: int
+    callback: Callable[[], None]
+    label: str = ""
+
+    def contains(self, y: int, x: int) -> bool:
+        return self.y1 <= y <= self.y2 and self.x1 <= x <= self.x2
+
+
 PAGES = [
     Page("Session", "1", "Pattern Browser", "Choose a squad shape, then start or restore the tmux session."),
     Page("Agents", "2", "Agent Roster", "Inspect live agents, inboxes, and roster metadata."),
@@ -68,6 +91,10 @@ class Glyphs:
 
 
 GLYPHS = Glyphs()
+
+_TMUX_STATE_CACHE: dict[str, tuple[float, str | None]] = {}
+_TMUX_STATE_TTL = 1.0
+_TMUX_SHELL_COMMANDS = {"bash", "sh", "zsh", "fish", "dash", "ksh", ""}
 
 
 def agents_dir() -> Path:
@@ -110,6 +137,83 @@ def read_inbox_messages(limit: int = 80) -> list[dict]:
             messages.append(msg)
     messages.sort(key=lambda msg: (msg.get("read") is not False, str(msg.get("ts", ""))))
     return messages[:limit]
+
+
+def unread_inbox_count(agent_id: str) -> int:
+    path = agents_dir() / "inbox" / f"{agent_id}.jsonl"
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    continue
+                if msg.get("read") is False:
+                    count += 1
+    except Exception:
+        return 0
+    return count
+
+
+def inbox_unread_counts(agent_ids: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for agent_id in agent_ids:
+        if not agent_id:
+            continue
+        counts[str(agent_id)] = unread_inbox_count(str(agent_id))
+    return counts
+
+
+def _tmux_is_available() -> bool:
+    return shutil.which("tmux") is not None
+
+
+def pane_target_state(target: str) -> str | None:
+    target = (target or "").strip()
+    if not target or not _tmux_is_available():
+        return None
+    now = time.monotonic()
+    cached = _TMUX_STATE_CACHE.get(target)
+    if cached:
+        cached_at, value = cached
+        if now - cached_at < _TMUX_STATE_TTL:
+            return value
+
+    state = None
+    try:
+        result = subprocess.run(
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{pane_current_command}",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=0.2,
+        )
+        if result.returncode == 0:
+            cmd = (result.stdout or "").strip()
+            if cmd in _TMUX_SHELL_COMMANDS:
+                state = "shell"
+            elif cmd:
+                state = cmd
+            else:
+                state = "unknown"
+        else:
+            state = "missing"
+    except Exception:
+        state = None
+
+    _TMUX_STATE_CACHE[target] = (now, state)
+    return state
 
 
 PATTERN_ORDER = [
@@ -242,7 +346,7 @@ class App:
         self.expanded_detail = False
         self.show_help = False
         self.filters: dict[str, str] = {}
-        self.click_zones: list[tuple[int, int, int, int, Callable[[], None]]] = []
+        self.click_zones: list[ClickZone] = []
         self.output_lock = threading.Lock()
         self.command_proc: subprocess.Popen | None = None
         self.command_thread: threading.Thread | None = None
@@ -251,7 +355,7 @@ class App:
 
     def run(self):
         curses.curs_set(0)
-        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
         self.stdscr.keypad(True)
         self.stdscr.timeout(250)
         self.init_colors()
@@ -377,20 +481,26 @@ class App:
         tasks = read_json(agents_dir() / "tasks.json", {"tasks": []})
         agents = [a for a in roster.get("agents", []) if a.get("status") == "active"]
         messages = read_inbox_messages()
+        agent_ids = [agent.get("id") for agent in agents if agent.get("id")]
+        agent_unread = inbox_unread_counts(agent_ids)
         unread = sum(1 for msg in messages if msg.get("read") is False)
         task_counts = {"pending": 0, "claimed": 0, "blocked": 0, "done": 0}
         for task in tasks.get("tasks", []):
             status = task.get("status")
             if status in task_counts:
                 task_counts[status] += 1
+        has_roster = (agents_dir() / "roster.json").exists()
         return {
             "session": roster.get("session") or "none",
             "agents": agents,
             "messages": messages,
             "tasks": tasks.get("tasks", []),
+            "agent_unread": agent_unread,
             "unread": unread,
             "task_counts": task_counts,
             "has_session": bool(roster.get("session")),
+            "has_roster": has_roster,
+            "first_run": not has_roster and not roster.get("session"),
         }
 
     def actions(self) -> list[Action]:
@@ -405,9 +515,18 @@ class App:
     def session_actions(self) -> list[Action]:
         return [
             Action("Preview launch", lambda app: app.preview_pattern_launch(), "show command without running"),
-            Action("Start selected", lambda app: app.start_pattern(), "orchestrate --yolo <selected-pattern>", "mutating"),
-            Action("Restore panes", lambda app: app.run_lifecycle_cmd(["orch-restore", "--no-attach"]), risk="mutating"),
-            Action("Show iTerm cmd", lambda app: app.show_command(["orch-restore", "--iterm-cc"]), "copy/run outside TUI"),
+            Action("Start selected", lambda app: app.start_pattern(), "start highlighted pattern with --yolo", "mutating"),
+            Action(
+                "Restore panes",
+                lambda app: app.restore_panes(),
+                "rebuild panes from existing .agents state",
+                risk="mutating",
+            ),
+            Action(
+                "Show iTerm cmd",
+                lambda app: app.show_iterm_restore_command(),
+                "copy a restore command for existing .agents state",
+            ),
             Action("Preflight", lambda app: app.run_cmd(["orch-preflight"])),
             Action("End session", lambda app: app.end_session(), risk="destructive"),
         ]
@@ -449,7 +568,7 @@ class App:
         return [
             Action("Preflight", lambda app: app.run_cmd(["orch-preflight"])),
             Action("Repair", lambda app: app.run_cmd(["orch-preflight", "--repair"]), "orch-preflight --repair", "mutating"),
-            Action("Restore", lambda app: app.run_lifecycle_cmd(["orch-restore", "--no-attach"]), risk="mutating"),
+            Action("Restore", lambda app: app.restore_panes(), "rebuild panes from existing .agents state", "mutating"),
             Action("Roster", lambda app: app.run_cmd(["orch-status", "--roster"])),
             Action("Status board", lambda app: app.run_cmd(["orch-status", "--status"])),
             Action("Recent bus", lambda app: app.run_cmd(["orch-status"])),
@@ -515,21 +634,24 @@ class App:
         for idx, page in enumerate(PAGES):
             selected = idx == self.section_index
             attr = curses.color_pair(6) | curses.A_BOLD if selected else self.muted_attr()
-            label = f" {page.key} {page.name} "
+            label = f"[{page.key} {page.name}]"
             self.addstr(5, x, label, attr)
-            self.click_zones.append((5, x, 5, x + len(label), lambda i=idx: self.select_section(i)))
+            self.add_click_zone(5, x, 5, x + len(label) - 1, lambda i=idx: self.select_section(i), f"tab:{page.name}")
             x += len(label) + 1
         self.hline(6, 0, w)
 
     def draw_page(self, h: int, w: int, state: dict):
         top = 8
         bottom_reserved = 8 if self.output else 5
+        if self.page().name == "Session" and state["first_run"] and h >= 30:
+            self.draw_first_run_banner(top, 2, 6, w - 4)
+            top += 7
         body_h = max(8, h - top - bottom_reserved)
         show_inspector = w >= 112
         main_w = int(w * 0.64) if show_inspector else w - 4
         inspector_w = w - main_w - 5
         self.draw_panel(top, 2, body_h, main_w, self.page().title)
-        self.draw_page_header(top, 4, main_w - 4)
+        self.draw_page_header(top, 4, main_w - 4, state)
         rows = self.current_rows(state)
         visible_rows = max(0, body_h - (5 if show_inspector else 6))
         self.clamp_row(rows)
@@ -541,11 +663,39 @@ class App:
             self.addstr(top + body_h - 2, 4, "narrow view: press f for selected detail", self.muted_attr())
         self.draw_output_drawer(h, w)
 
-    def draw_page_header(self, y: int, x: int, width: int):
+    def draw_first_run_banner(self, y: int, x: int, height: int, width: int):
+        self.draw_panel(y, x, height, width, "Start Here")
+        self.addstr(y + 1, x + 2, self.clip("New project: pick a pattern, configure models, then launch.", width - 4), curses.color_pair(8) | curses.A_BOLD)
+        self.addstr(y + 2, x + 2, self.clip("1 Choose pattern row   2 Run Start selected   3 Submit the launch form", width - 4), self.muted_attr())
+        self.addstr(y + 3, x + 2, self.clip("Restore is disabled until .agents/roster.json exists.", width - 4), curses.color_pair(4))
+
+        actions = [
+            ("[Preview]", lambda: self.preview_pattern_launch()),
+            ("[+ Start selected]", lambda: self.start_pattern()),
+            ("[Preflight]", lambda: self.run_cmd(["orch-preflight"])),
+        ]
+        bx = x + 2
+        by = y + 4
+        self.addstr(by, bx, "Quick actions: ", self.muted_attr() | curses.A_BOLD)
+        bx += len("Quick actions: ")
+        for label, callback in actions:
+            if bx + len(label) >= x + width - 2:
+                break
+            attr = curses.color_pair(8) if "+" not in label else curses.color_pair(8) | curses.A_BOLD
+            self.addstr(by, bx, label, attr)
+            self.add_click_zone(by, bx, by, bx + len(label) - 1, callback, f"quick:{label}")
+            bx += len(label) + 1
+
+    def draw_page_header(self, y: int, x: int, width: int, state: dict):
         page = self.page()
         self.addstr(y + 1, x, self.clip(page.subtitle, width), curses.color_pair(8) | curses.A_BOLD)
+        session_hint = (
+            "No active session: choose a pattern with j/k and run Start selected."
+            if not state["has_session"]
+            else "Session exists. Start a pattern for changes or Restore panes if panes vanish."
+        )
         hints = {
-            "Session": "j/k chooses pattern. Start selected uses highlighted row; / filters.",
+            "Session": f"{session_hint} Restore only applies when .agents/roster.json exists.",
             "Agents": "j/k select agent. Enter runs selected action. / filters rows.",
             "Messages": "Unread inbox items are shown first. Use Send/Broadcast below.",
             "Tasks": "j/k select task. Use actions below to mutate via orch-task.",
@@ -558,7 +708,7 @@ class App:
         title_w = max(12, min(24, width // 3))
         value = {
             "Session": "description / state",
-            "Agents": "role | model | pane target",
+            "Agents": "role | model | unread | target",
             "Messages": "payload / bus line",
             "Tasks": "status | owner | title",
             "Health": "current value",
@@ -580,16 +730,29 @@ class App:
                 for item in pattern_metadata()
             ]
             rows.extend([
+                {
+                    "kind": "metric",
+                    "title": "Session bootstrap",
+                    "value": "No active session. Pick a pattern and run Start selected.",
+                    "status": "warn" if not state["has_session"] else "dim",
+                },
                 {"kind": "metric", "title": "Current session", "value": state["session"], "status": "ok" if state["has_session"] else "warn"},
                 {"kind": "metric", "title": "Project", "value": str(PROJECT), "status": "dim"},
             ])
+            if not state["has_roster"]:
+                rows.append({
+                    "kind": "metric",
+                    "title": "Restore guidance",
+                    "value": "Restore panes is only available when .agents/roster.json exists.",
+                    "status": "warn",
+                })
         elif section == "Agents":
             rows = [
                 {
                     "kind": "agent",
                     "title": agent.get("id", ""),
-                    "value": f"{agent.get('role','')} | {agent.get('model','')} | {agent.get('target','')}",
-                    "status": "ok",
+                    "value": f"{agent.get('role','')} | {agent.get('model','')} | unread {state['agent_unread'].get(agent.get('id', ''), 0)} | {agent.get('target','')}",
+                    "status": "warn" if state["agent_unread"].get(agent.get('id', ''), 0) else "ok",
                     "raw": agent,
                 }
                 for agent in state["agents"]
@@ -654,7 +817,7 @@ class App:
             right = self.clip(str(row.get("value", "")), right_w)
             line = f"{marker} {badge:<8} {left:<{title_w}} {right}"
             self.addstr(y + offset, x, self.clip(line.ljust(width), width), attr)
-            self.click_zones.append((y + offset, x, y + offset, x + width, lambda i=idx: self.select_row(i)))
+            self.add_click_zone(y + offset, x, y + offset, x + width - 1, lambda i=idx: self.select_row(i), f"row:{idx}")
 
     def empty_lines(self) -> list[str]:
         if self.current_filter():
@@ -714,7 +877,28 @@ class App:
                 if models:
                     lines.extend(["", "Pattern defaults:", *textwrap.wrap(models, width=width)])
                     lines.extend(["", f"TUI launch default: all roles -> {default_model()}"])
+                if not state["has_session"]:
+                    lines.extend([
+                        "",
+                        "No active session.",
+                        "Pick this pattern and run Start selected to bootstrap a new session.",
+                    ])
+                    if not state["has_roster"]:
+                        lines.extend([
+                            "",
+                            "Restore panes is only available when .agents/roster.json exists.",
+                        ])
                 return lines
+            if not state["has_session"]:
+                return [
+                    "No active session.",
+                    "Pick a pattern row, then run Start selected.",
+                    "Restore panes is only available when .agents/roster.json exists.",
+                    "Use / to filter names/descriptions.",
+                    "",
+                    "Recent output: press e/o",
+                    "Full detail: press f",
+                ]
             return [
                 "What to do here",
                 "Pick a pattern row, then run Start selected.",
@@ -730,11 +914,15 @@ class App:
             if not selected:
                 return ["No agent selected", "Add an agent or restore a session."]
             agent = selected.get("raw", {})
+            unread = state["agent_unread"].get(agent.get("id", ""), 0)
+            pane_state = pane_target_state(agent.get("target", ""))
             return [
                 f"Agent {agent.get('id','')}",
                 f"role:   {agent.get('role','')}",
                 f"model:  {agent.get('model','')}",
+                f"unread: {unread}",
                 f"target: {agent.get('target','')}",
+            ] + ([f"pane:   {pane_state}"] if pane_state else []) + [
                 f"resume: {agent.get('resume','') or '-'}",
                 f"hats:   {', '.join(agent.get('hats', []) or []) or '-'}",
                 "",
@@ -775,7 +963,7 @@ class App:
                 "3. Restore if panes disappeared",
                 "4. Turn enforce on if agents drift",
                 "",
-                "This page should explain action, not dump noise.",
+                "Use actions below for commands; this pane keeps context visible.",
             ]
         return []
 
@@ -806,12 +994,13 @@ class App:
             return
         y = h - 7
         self.draw_panel(y, 2, 4, w - 4, "Output")
+        self.add_click_zone(y, 2, y + 3, w - 3, self.toggle_output, "output")
         lines = output[-2:]
         for idx, line in enumerate(lines[:2]):
             self.addstr(y + 1 + idx, 4, self.clip(line, w - 8), curses.color_pair(8))
-        footer = "e/o expands output"
+        footer = "click or e/o expands output"
         if self.command_running():
-            footer = f"running {self.spinner()} {self.elapsed_label()} | press x to cancel | e/o expands output"
+            footer = f"running {self.spinner()} {self.elapsed_label()} | x cancel | click or e/o expands output"
         self.addstr(y + 3, 4, self.clip(footer, w - 8), curses.color_pair(4))
 
     def draw_expanded_output(self, h: int, w: int):
@@ -836,8 +1025,9 @@ class App:
         actions = self.actions()
         if not actions:
             return
+        self.addstr(y, 2, "Actions (click):", self.muted_attr() | curses.A_BOLD)
         start = max(0, self.action_index - 2)
-        x = 2
+        x = 18
         if start > 0:
             self.addstr(y, x, "<", self.muted_attr())
             x += 2
@@ -846,7 +1036,7 @@ class App:
             selected = idx == self.action_index
             attr = self.action_attr(action, selected)
             marker = GLYPHS.arrow if selected else " "
-            label = f" {marker} {self.action_badge(action)}{action.label} "
+            label = self.action_button_label(action, marker)
             if x + len(label) >= w - 2:
                 hidden = len(actions) - idx
                 overflow = f" +{hidden} more >"
@@ -855,7 +1045,7 @@ class App:
                 self.addstr(y, x, overflow, curses.color_pair(4))
                 break
             self.addstr(y, x, label, attr)
-            self.click_zones.append((y, x, y, x + len(label), lambda i=idx: self.run_action(i)))
+            self.add_click_zone(y, x, y, x + len(label) - 1, lambda i=idx: self.run_action(i), f"action:{action.label}")
             x += len(label) + 1
 
     def action_attr(self, action: Action, selected: bool) -> int:
@@ -871,11 +1061,18 @@ class App:
     def action_badge(action: Action) -> str:
         return {"destructive": "! ", "mutating": "+ ", "safe": ""}.get(action.risk, "")
 
+    def action_button_label(self, action: Action, marker: str = " ") -> str:
+        parts = [part for part in (marker.strip(), self.action_badge(action).strip(), action.label) if part]
+        return f"[{' '.join(parts)}]"
+
     def draw_footer(self, h: int, w: int):
         if self.command_running():
-            footer = f" RUNNING {self.spinner()} {self.command_cmd} ({self.elapsed_label()}) | x cancel | e output | q quit "
+            footer = (
+                f" RUNNING {self.spinner()} {self.command_cmd} ({self.elapsed_label()})"
+                " | x cancel | e/o output | q quit "
+            )
         else:
-            footer = " ? help | : actions | / filter | c clear | Tab/1-5 page | h/l action | j/k row | Enter run | f detail | e output | q quit "
+            footer = " mouse: click tabs/rows/actions/output | ? help | : actions | / filter | h/l action | j/k row | Enter run | s submit(form) | q quit "
         self.fill(h - 1, 0, w, " ", curses.color_pair(1))
         self.addstr(h - 1, 1, self.clip(footer, w - 2), curses.color_pair(1))
 
@@ -890,6 +1087,7 @@ class App:
             "tabs/pages for resources, selected-row inspector, action bar, command jump.",
             "",
             "1-5 / Tab      change page",
+            "mouse           click tabs, rows, action buttons, output drawer",
             "j/k or arrows   move selected row",
             "h/l             move selected action",
             "Enter           run selected action",
@@ -900,6 +1098,7 @@ class App:
             "e/o             expand command output",
             "j/k PgUp/PgDn   scroll expanded output",
             "x               cancel running command",
+            "s               submit active form (instead of Enter)",
             "r               refresh state",
             "q               quit",
             "",
@@ -935,12 +1134,23 @@ class App:
             _, mx, my, _, bstate = curses.getmouse()
         except curses.error:
             return
-        if not (bstate & curses.BUTTON1_CLICKED or bstate & curses.BUTTON1_RELEASED):
+        if not (bstate & getattr(curses, "BUTTON1_CLICKED", 0)):
             return
-        for y1, x1, y2, x2, callback in self.click_zones:
-            if y1 <= my <= y2 and x1 <= mx <= x2:
-                callback()
+        for zone in self.click_zones:
+            if zone.contains(my, mx):
+                zone.callback()
+                if zone.label and not zone.label.startswith("action:"):
+                    self.message = f"clicked {zone.label}"
                 return
+
+    def add_click_zone(self, y1: int, x1: int, y2: int, x2: int, callback: Callable[[], None], label: str = ""):
+        self.click_zones.append(ClickZone(y1, x1, y2, x2, callback, label))
+
+    def toggle_output(self):
+        if self.output_snapshot():
+            self.expanded_output = not self.expanded_output
+            self.expanded_detail = False
+            self.output_scroll = 0
 
     def select_section(self, idx: int):
         self.section_index = idx
@@ -1058,6 +1268,185 @@ class App:
             self.addstr(y + 4 + idx, x + 2, self.clip(label, ow - 4), attr)
         if len(candidates) > max_rows:
             self.addstr(y + oh - 2, x + 2, f"+{len(candidates) - max_rows} more matches, refine the query", curses.color_pair(4))
+
+    def run_form(
+        self,
+        title: str,
+        fields: list[FormField],
+        preview: Callable[[dict[str, str]], list[str]] | None = None,
+        after_edit: Callable[[list[FormField], int], tuple[list[FormField], int] | None] | None = None,
+    ) -> dict[str, str] | None:
+        selected = 0
+        editing = -1
+        editor_value = ""
+        editor_cursor = 0
+        message = "Enter/e edit | s submit | q/Esc cancel"
+
+        def set_cursor(visible: bool):
+            try:
+                curses.curs_set(1 if visible else 0)
+            except curses.error:
+                pass
+
+        while True:
+            self.stdscr.erase()
+            h, w = self.stdscr.getmaxyx()
+            edit_hint = "Enter to save, Esc to cancel, Ctrl-U clear, Backspace delete"
+            if editing >= 0:
+                self.draw_form_overlay(
+                    h,
+                    w,
+                    title,
+                    fields,
+                    selected,
+                    f"{edit_hint} | {message}",
+                    preview,
+                    editing,
+                    editor_value,
+                    editor_cursor,
+                )
+                set_cursor(True)
+            else:
+                self.draw_form_overlay(h, w, title, fields, selected, message, preview)
+                set_cursor(False)
+            self.stdscr.refresh()
+            key = self.stdscr.getch()
+            if key == -1:
+                continue
+            if editing >= 0 and key in (10, 13, curses.KEY_ENTER):
+                fields[editing].value = editor_value.strip()
+                if after_edit:
+                    refreshed = after_edit(fields, selected)
+                    if refreshed:
+                        fields, selected = refreshed
+                message = "Saved field. Press s to submit or keep editing."
+                editing = -1
+                continue
+            if editing >= 0 and key == 27:
+                editing = -1
+                editor_value = ""
+                editor_cursor = 0
+                message = "Enter/e edit | s submit | q/Esc cancel"
+                continue
+            if editing >= 0 and key == 21:
+                editor_value = ""
+                editor_cursor = 0
+                continue
+            if editing >= 0 and key in (curses.KEY_BACKSPACE, 127, 8):
+                if editor_cursor > 0:
+                    editor_value = editor_value[: editor_cursor - 1] + editor_value[editor_cursor:]
+                    editor_cursor -= 1
+                continue
+            if editing >= 0 and key in (curses.KEY_DC,):
+                if editor_cursor < len(editor_value):
+                    editor_value = editor_value[:editor_cursor] + editor_value[editor_cursor + 1:]
+                continue
+            if editing >= 0 and key in (curses.KEY_LEFT,):
+                editor_cursor = max(0, editor_cursor - 1)
+                continue
+            if editing >= 0 and key in (curses.KEY_RIGHT,):
+                editor_cursor = min(len(editor_value), editor_cursor + 1)
+                continue
+            if editing >= 0 and key >= 0 and key <= 255:
+                ch = chr(key)
+                if ch.isprintable():
+                    editor_value = editor_value[:editor_cursor] + ch + editor_value[editor_cursor:]
+                    editor_cursor += 1
+                continue
+            if key in (27, ord("q"), ord("Q")):
+                return None
+            if key in (curses.KEY_DOWN, ord("j")):
+                selected = min(selected + 1, len(fields) - 1)
+                continue
+            if key in (curses.KEY_UP, ord("k")):
+                selected = max(selected - 1, 0)
+                continue
+            if key in (ord("s"), ord("S")):
+                missing = [field.label for field in fields if field.required and not field.value.strip()]
+                if missing:
+                    message = f"Missing required: {', '.join(missing[:3])}"
+                    continue
+                return {field.key: field.value.strip() for field in fields}
+            if key in (curses.KEY_ENTER, 10, 13, ord("e"), ord("E")):
+                if not fields:
+                    continue
+                field = fields[selected]
+                editing = selected
+                editor_value = field.value
+                editor_cursor = len(editor_value)
+                message = f"editing {field.label}"
+
+    def draw_form_overlay(
+        self,
+        h: int,
+        w: int,
+        title: str,
+        fields: list[FormField],
+        selected: int,
+        message: str,
+        preview: Callable[[dict[str, str]], list[str]] | None,
+        editing: int = -1,
+        editor_value: str = "",
+        editor_cursor: int = 0,
+    ):
+        oh = min(max(18, len(fields) + 12), h - 4)
+        ow = min(104, w - 8)
+        y = max(2, (h - oh) // 2)
+        x = max(2, (w - ow) // 2)
+        self.draw_panel(y, x, oh, ow, title)
+        warning = "Missing required:" in message
+        self.addstr(y + 1, x + 2, self.clip(f"Status: {message}", ow - 4), curses.color_pair(4) | curses.A_BOLD if warning else self.muted_attr())
+        if fields and fields[selected].hint:
+            self.addstr(y + 2, x + 2, self.clip(fields[selected].hint, ow - 4), self.muted_attr())
+
+        field_width = max(28, min(46, ow // 2 - 4))
+        value_width = max(18, ow - field_width - 6)
+        max_field_rows = min(len(fields), max(3, oh - 8))
+        start = 0
+        if selected >= max_field_rows:
+            start = selected - max_field_rows + 1
+
+        edit_row = None
+        for offset, field in enumerate(fields[start:start + max_field_rows]):
+            idx = start + offset
+            row_y = y + 3 + offset
+            missing_required = field.required and not field.value.strip() and editing != idx
+            attr = curses.color_pair(6) | curses.A_BOLD if idx == selected else curses.color_pair(8)
+            if missing_required and idx != selected:
+                attr = curses.color_pair(4) | curses.A_BOLD
+            marker = GLYPHS.arrow if idx == selected else " "
+            required = "!" if missing_required else "*" if field.required else " "
+            left = self.clip(f"{marker} {required} {field.label}", field_width)
+            if editing == idx:
+                value = editor_value if editor_cursor <= len(editor_value) else editor_value[:editor_cursor]
+                value_text = value or "-"
+                view_start = max(0, editor_cursor - value_width + 1)
+                value = self.clip(value_text[view_start : view_start + value_width], value_width)
+                if selected == idx:
+                    edit_row = (row_y, value_width, view_start, editor_cursor)
+            else:
+                value = self.clip(field.value or "-", value_width)
+            suffix = " REQUIRED" if missing_required else ""
+            self.addstr(row_y, x + 2, self.clip(f"{left:<{field_width}} {value}{suffix}", ow - 4), attr)
+
+        if edit_row and selected == editing:
+            row_y, row_w, view_start, cursor = edit_row
+            visible_cursor = max(0, min(cursor - view_start, row_w - 1))
+            cursor_x = x + 2 + field_width + 1 + visible_cursor
+            self.stdscr.move(row_y, cursor_x)
+
+        preview_lines: list[str] = []
+        if preview:
+            preview_values = {field.key: field.value.strip() for field in fields}
+            if 0 <= editing < len(fields):
+                preview_values[fields[editing].key] = editor_value.strip()
+            preview_lines = preview(preview_values)
+        preview_y = y + 4 + max_field_rows
+        self.addstr(preview_y, x + 2, "Preview", curses.color_pair(8) | curses.A_BOLD)
+        for idx, line in enumerate(preview_lines[: max(0, oh - (preview_y - y) - 2)]):
+            self.addstr(preview_y + 1 + idx, x + 2, self.clip(line, ow - 4), self.muted_attr())
+        footer = "[Enter Edit/Save] [s Submit] [Esc Cancel] [j/k Move] [Ctrl-U Clear]"
+        self.addstr(y + oh - 2, x + 2, self.clip(footer, ow - 4), curses.color_pair(8) | curses.A_BOLD)
 
     def prompt(self, label: str, default: str = "") -> str:
         h, w = self.stdscr.getmaxyx()
@@ -1195,6 +1584,29 @@ class App:
     def run_lifecycle_cmd(self, args: list[str], extra_env: dict[str, str] | None = None):
         self.run_cmd(args, timeout=None, extra_env=extra_env)
 
+    def restore_state_available(self) -> bool:
+        return (agents_dir() / "roster.json").exists()
+
+    def restore_unavailable(self):
+        self.output = [
+            "orch-restore requires existing .agents/roster.json state.",
+            "For a new project, pick a pattern on the Session page and run Start selected.",
+            "If state should exist, run Preflight to inspect the project.",
+        ]
+        self.message = "restore unavailable: no .agents/roster.json"
+
+    def restore_panes(self):
+        if not self.restore_state_available():
+            self.restore_unavailable()
+            return
+        self.run_lifecycle_cmd(["orch-restore", "--no-attach"])
+
+    def show_iterm_restore_command(self):
+        if not self.restore_state_available():
+            self.restore_unavailable()
+            return
+        self.show_command(["orch-restore", "--iterm-cc"])
+
     def show_command(self, args: list[str]):
         self.output = [
             f"$ {command_label(args)}",
@@ -1205,11 +1617,17 @@ class App:
         self.message = f"command preview: {command_label(args)}"
 
     def start_pattern(self):
-        pattern = self.selected_pattern_name() or self.prompt("Pattern", "lean")
-        launch_flags = self.prompt("Launch flags before pattern", "--yolo")
-        model_choice = self.prompt("Model for all roles (type pattern to keep defaults)", default_model())
-        pattern_args = self.prompt("Pattern args after pattern", "")
-        extra_env = self.model_override_env(model_choice, self.pattern_raw(pattern))
+        initial_pattern = self.selected_pattern_name() or "lean"
+        fields = self.launch_form_fields(initial_pattern)
+        values = self.run_form("Start Pattern", fields, self.launch_preview_lines, self.refresh_launch_form_fields)
+        if values is None:
+            self.message = "launch cancelled"
+            return
+        pattern = values.get("pattern") or initial_pattern
+        launch_flags = values.get("launch_flags", "")
+        pattern_args = values.get("pattern_args", "")
+        raw = self.pattern_raw(pattern)
+        extra_env = self.model_env_from_values(values, raw)
         try:
             args = ["orchestrate"]
             if launch_flags:
@@ -1228,13 +1646,63 @@ class App:
             return
         self.run_lifecycle_cmd(args, extra_env=extra_env)
 
+    def launch_form_fields(self, pattern: str) -> list[FormField]:
+        raw = self.pattern_raw(pattern)
+        fields = [
+            FormField("pattern", "Pattern", pattern, "patterns/*.sh", True),
+            FormField("launch_flags", "Launch flags", "--yolo", "before pattern"),
+            FormField("pattern_args", "Pattern args", "", "after pattern"),
+        ]
+        for role, pattern_default in self.pattern_roles(raw):
+            fields.append(FormField(f"model_{role}", f"Model: {role}", default_model(), f"pattern: {pattern_default or '-'}"))
+        return fields
+
+    def refresh_launch_form_fields(self, fields: list[FormField], selected: int) -> tuple[list[FormField], int] | None:
+        if not fields or fields[selected].key != "pattern":
+            return None
+        old_values = {field.key: field.value for field in fields}
+        pattern = old_values.get("pattern", "").strip()
+        refreshed = self.launch_form_fields(pattern)
+        for field in refreshed:
+            if field.key in old_values:
+                field.value = old_values[field.key]
+        return refreshed, min(selected, len(refreshed) - 1)
+
+    def launch_preview_lines(self, values: dict[str, str]) -> list[str]:
+        pattern = values.get("pattern") or "lean"
+        launch_flags = values.get("launch_flags", "")
+        pattern_args = values.get("pattern_args", "")
+        raw = self.pattern_raw(pattern)
+        try:
+            args = ["orchestrate"]
+            if launch_flags:
+                args.extend(shlex.split(launch_flags))
+            args.append(pattern)
+            if pattern_args:
+                args.extend(shlex.split(pattern_args))
+            command = command_label(args)
+        except ValueError as exc:
+            return [f"Invalid launch args: {exc}"]
+
+        lines = [f"$ {command}"]
+        env = self.model_env_from_values(values, raw)
+        if env:
+            lines.extend(f"{key}={value}" for key, value in sorted(env.items()))
+        else:
+            lines.append("Using pattern model defaults.")
+        if self.pattern_roles(raw):
+            lines.append("Set any role model to 'pattern' to keep that role's pattern default.")
+        if any(flag in ("--attach", "--iterm-cc", "--cc", "-CC") for flag in args[1:]):
+            lines.append("Attach/control-mode command will be shown, not run inside TUI.")
+        return lines
+
     def preview_pattern_launch(self):
         pattern = self.selected_pattern_name() or "lean"
         rows = self.current_rows(self.state())
         selected = rows[self.row_index] if rows and self.row_index < len(rows) else {}
         raw = selected.get("raw", {}) if selected.get("kind") == "pattern" else {}
         command = ["orchestrate", "--yolo", pattern]
-        model_env = self.model_override_env(default_model(), raw)
+        model_env = self.model_env_from_choice(default_model(), raw)
         lines = [
             f"Selected pattern: {pattern}",
             f"Default launch: {command_label(command)}",
@@ -1254,7 +1722,7 @@ class App:
         self.output = lines
         self.message = f"preview: {command_label(command)}"
 
-    def model_override_env(self, model_choice: str, raw: dict | None = None) -> dict[str, str]:
+    def model_env_from_choice(self, model_choice: str, raw: dict | None = None) -> dict[str, str]:
         choice = (model_choice or "").strip()
         if not choice or choice.lower() in ("pattern", "default", "defaults", "-"):
             return {}
@@ -1262,15 +1730,36 @@ class App:
             rows = self.current_rows(self.state())
             selected = rows[self.row_index] if rows and self.row_index < len(rows) else {}
             raw = selected.get("raw", {}) if selected.get("kind") == "pattern" else {}
-        models = str(raw.get("models", ""))
         env: dict[str, str] = {}
-        for pair in models.split():
-            if ":" not in pair:
-                continue
-            role = pair.split(":", 1)[0].strip()
+        for role, _pattern_default in self.pattern_roles(raw):
             if role:
                 env[f"ORCH_MODEL_{role}"] = choice
         return env
+
+    def model_env_from_values(self, values: dict[str, str], raw: dict | None = None) -> dict[str, str]:
+        if raw is None:
+            raw = self.pattern_raw(values.get("pattern", ""))
+        env: dict[str, str] = {}
+        for role, _pattern_default in self.pattern_roles(raw):
+            value = (values.get(f"model_{role}", default_model()) or "").strip()
+            if not value or value.lower() in ("pattern", "default", "defaults", "-"):
+                continue
+            env[f"ORCH_MODEL_{role}"] = value
+        return env
+
+    @staticmethod
+    def pattern_roles(raw: dict | None) -> list[tuple[str, str]]:
+        if not raw:
+            return []
+        roles: list[tuple[str, str]] = []
+        for pair in str(raw.get("models", "")).split():
+            if ":" not in pair:
+                continue
+            role, pattern_default = pair.split(":", 1)
+            role = role.strip()
+            if role:
+                roles.append((role, pattern_default.strip()))
+        return roles
 
     @staticmethod
     def pattern_raw(name: str) -> dict:
@@ -1297,11 +1786,25 @@ class App:
             self.output = ["cancelled"]
 
     def add_agent(self):
-        role = self.prompt("Role", "coder")
-        model = self.prompt("Model", default_model())
-        agent_id = self.prompt("Agent id (optional)", "")
-        hats = self.prompt("Hats comma-list (optional)", "")
-        parent = self.prompt("Parent id (optional)", "")
+        values = self.run_form(
+            "Add Agent",
+            [
+                FormField("role", "Role", "coder", "required", True),
+                FormField("model", "Model", default_model(), "claude/codex/gemini/shell", True),
+                FormField("agent_id", "Agent id", "", "optional custom id"),
+                FormField("hats", "Hats", "", "comma-list"),
+                FormField("parent", "Parent id", "", "optional parent"),
+            ],
+            self.add_agent_preview_lines,
+        )
+        if values is None:
+            self.message = "add agent cancelled"
+            return
+        role = values.get("role", "")
+        model = values.get("model", "")
+        agent_id = values.get("agent_id", "")
+        hats = values.get("hats", "")
+        parent = values.get("parent", "")
         if not model:
             self.output = ["cancelled: model is required"]
             return
@@ -1314,19 +1817,52 @@ class App:
             args += ["--parent", parent]
         self.run_cmd(args)
 
+    @staticmethod
+    def add_agent_preview_lines(values: dict[str, str]) -> list[str]:
+        args = ["add-agent", values.get("role", "coder") or "coder", values.get("model", default_model()) or default_model()]
+        if values.get("agent_id"):
+            args += ["--id", values["agent_id"]]
+        if values.get("hats"):
+            args += ["--hats", values["hats"]]
+        if values.get("parent"):
+            args += ["--parent", values["parent"]]
+        return [f"$ {command_label(args)}"]
+
     def remove_agent(self):
         agent_id = self.prompt("Agent id", self.selected_agent_id())
         if agent_id and self.confirm(f"Type remove {agent_id} to confirm", f"remove {agent_id}"):
             self.run_cmd(["remove-agent", agent_id])
 
     def nudge_selected_agent(self):
-        agent_id = self.prompt("Agent id", self.selected_agent_id())
-        message = self.prompt(
-            "Message",
-            "Please check your inbox now, reply through orch-send/status, and report task/blockers.",
+        values = self.run_form(
+            "Nudge Selected",
+            [
+                FormField("agent_id", "Agent id", self.selected_agent_id(), "recipient agent id", True),
+                FormField(
+                    "message",
+                    "Message",
+                    "Please check your inbox now, reply through orch-send/status, and report task/blockers.",
+                    "payload text",
+                    True,
+                ),
+            ],
+            self.nudge_selected_agent_preview_lines,
         )
+        if values is None:
+            self.message = "nudge cancelled"
+            return
+        agent_id = values.get("agent_id", "")
+        message = values.get("message", "")
         if agent_id and message:
             self.run_cmd(["orch-send", agent_id, "--type", "INFO", message])
+
+    @staticmethod
+    def nudge_selected_agent_preview_lines(values: dict[str, str]) -> list[str]:
+        agent_id = values.get("agent_id", "")
+        message = values.get("message", "")
+        if not agent_id or not message:
+            return ["command preview: complete required fields (agent_id, message)"]
+        return [f"$ {command_label(['orch-send', agent_id, '--type', 'INFO', message])}"]
 
     def show_roster_metadata(self):
         agent_id = self.prompt("Agent id", self.selected_agent_id())
@@ -1344,11 +1880,32 @@ class App:
             self.run_cmd(["orch-inbox", "check", agent_id])
 
     def send_message(self):
-        agent_id = self.prompt("Agent id", self.selected_agent_id())
-        msg_type = self.prompt("Type", "INFO")
-        message = self.prompt("Message", "")
+        values = self.run_form(
+            "Send Message",
+            [
+                FormField("agent_id", "Agent id", self.selected_agent_id(), "recipient agent id", True),
+                FormField("msg_type", "Type", "INFO", "INFO | TASK | WARN | ERROR | DONE"),
+                FormField("message", "Message", "", "payload text", True),
+            ],
+            self.send_message_preview_lines,
+        )
+        if values is None:
+            self.message = "send message cancelled"
+            return
+        agent_id = values.get("agent_id", "")
+        msg_type = values.get("msg_type", "INFO")
+        message = values.get("message", "")
         if agent_id and message:
             self.run_cmd(["orch-send", agent_id, "--type", msg_type, message])
+
+    @staticmethod
+    def send_message_preview_lines(values: dict[str, str]) -> list[str]:
+        agent_id = values.get("agent_id", "")
+        msg_type = values.get("msg_type", "") or "INFO"
+        message = values.get("message", "")
+        if not agent_id or not message:
+            return ["command preview: complete required fields (agent_id, message)"]
+        return [f"$ {command_label(['orch-send', agent_id, '--type', msg_type, message])}"]
 
     def reply_to_selected_message(self):
         msg = self.selected_message()
@@ -1357,11 +1914,32 @@ class App:
             default_target = str(msg.get("from") or "")
             if default_target in ("", "human", "unknown"):
                 default_target = str(msg.get("inbox") or "")
-        agent_id = self.prompt("Reply target", default_target)
-        msg_type = self.prompt("Type", "INFO")
-        message = self.prompt("Message", "")
+        values = self.run_form(
+            "Reply Message",
+            [
+                FormField("agent_id", "Reply target", default_target, "recipient agent id", True),
+                FormField("msg_type", "Type", "INFO", "INFO | TASK | WARN | ERROR | DONE"),
+                FormField("message", "Message", "", "payload text", True),
+            ],
+            self.reply_message_preview_lines,
+        )
+        if values is None:
+            self.message = "reply cancelled"
+            return
+        agent_id = values.get("agent_id", "")
+        msg_type = values.get("msg_type", "INFO")
+        message = values.get("message", "")
         if agent_id and message:
             self.run_cmd(["orch-send", agent_id, "--type", msg_type, message])
+
+    @staticmethod
+    def reply_message_preview_lines(values: dict[str, str]) -> list[str]:
+        agent_id = values.get("agent_id", "")
+        msg_type = values.get("msg_type", "") or "INFO"
+        message = values.get("message", "")
+        if not agent_id or not message:
+            return ["command preview: complete required fields (target, message)"]
+        return [f"$ {command_label(['orch-send', agent_id, '--type', msg_type, message])}"]
 
     def peek_selected_message_inbox(self):
         msg = self.selected_message()
@@ -1371,23 +1949,66 @@ class App:
             self.run_cmd(["orch-inbox", "peek", agent_id])
 
     def broadcast_message(self):
-        msg_type = self.prompt("Type", "INFO")
-        message = self.prompt("Message", "")
+        values = self.run_form(
+            "Broadcast Message",
+            [
+                FormField("msg_type", "Type", "INFO", "INFO | TASK | WARN | ERROR | DONE"),
+                FormField("message", "Message", "", "payload text", True),
+            ],
+            self.broadcast_message_preview_lines,
+        )
+        if values is None:
+            self.message = "broadcast cancelled"
+            return
+        msg_type = values.get("msg_type", "INFO")
+        message = values.get("message", "")
         if message:
             self.run_cmd(["orch-send", "--broadcast", "--type", msg_type, message])
 
+    @staticmethod
+    def broadcast_message_preview_lines(values: dict[str, str]) -> list[str]:
+        msg_type = values.get("msg_type", "") or "INFO"
+        message = values.get("message", "")
+        if not message:
+            return ["command preview: complete required fields (message)"]
+        return [f"$ {command_label(['orch-send', '--broadcast', '--type', msg_type, message])}"]
+
     def create_task(self):
-        title = self.prompt("Title", "")
-        task_id = self.prompt("Task id (optional)", "")
-        deps = self.prompt("Depends on comma-list (optional)", "")
-        if not title:
+        values = self.run_form(
+            "Create Task",
+            [
+                FormField("title", "Title", "", "task summary", True),
+                FormField("task_id", "Task id (optional)", "", "override generated task id"),
+                FormField("depends_on", "Depends on (optional)", "", "comma-separated task ids"),
+            ],
+            self.create_task_preview_lines,
+        )
+        if values is None:
+            self.message = "create task cancelled"
             return
+        title = values.get("title", "")
+        task_id = values.get("task_id", "")
+        depends_on = values.get("depends_on", "")
         args = ["orch-task", "create", title]
         if task_id:
             args += ["--id", task_id]
-        if deps:
-            args += ["--depends", deps]
+        if depends_on:
+            args += ["--depends", depends_on]
         self.run_cmd(args)
+
+    @staticmethod
+    def create_task_preview_lines(values: dict[str, str]) -> list[str]:
+        title = values.get("title", "")
+        task_id = values.get("task_id", "")
+        depends_on = values.get("depends_on", "")
+        if not title:
+            return ["command preview: complete required fields (title)"]
+        args = ["orch-task", "create", title]
+        if task_id:
+            args += ["--id", task_id]
+        if depends_on:
+            args += ["--depends", depends_on]
+        return [f"$ {command_label(args)}"]
 
     def show_selected_task(self):
         task_id = self.prompt("Task id", self.selected_task_id())
@@ -1395,36 +2016,133 @@ class App:
             self.run_cmd(["orch-task", "show", task_id])
 
     def claim_task(self):
-        task_id = self.prompt("Task id", self.selected_task_id())
-        agent = self.prompt("Agent id", self.selected_agent_id())
+        values = self.run_form(
+            "Claim Task",
+            [
+                FormField("task_id", "Task id", self.selected_task_id(), "task id", True),
+                FormField("agent", "Agent id", self.selected_agent_id(), "agent id", True),
+            ],
+            self.claim_task_preview_lines,
+        )
+        if values is None:
+            self.message = "claim task cancelled"
+            return
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
         if task_id and agent:
             self.run_cmd(["orch-task", "claim", task_id, agent])
 
+    @staticmethod
+    def claim_task_preview_lines(values: dict[str, str]) -> list[str]:
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        if not task_id or not agent:
+            return ["command preview: complete required fields (task_id, agent)"]
+        return [f"$ {command_label(['orch-task', 'claim', task_id, agent])}"]
+
     def complete_task(self):
-        task_id = self.prompt("Task id", self.selected_task_id())
-        agent = self.prompt("Agent id", self.selected_task_owner() or self.selected_agent_id())
-        note = self.prompt("Note (optional)", "")
+        values = self.run_form(
+            "Complete Task",
+            [
+                FormField("task_id", "Task id", self.selected_task_id(), "task id", True),
+                FormField("agent", "Agent id", self.selected_task_owner() or self.selected_agent_id(), "task owner", True),
+                FormField("note", "Note (optional)", "", "optional note"),
+            ],
+            self.complete_task_preview_lines,
+        )
+        if values is None:
+            self.message = "complete task cancelled"
+            return
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        note = values.get("note", "")
         if task_id and agent:
             self.run_cmd(["orch-task", "complete", task_id, agent, "--note", note])
 
+    @staticmethod
+    def complete_task_preview_lines(values: dict[str, str]) -> list[str]:
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        note = values.get("note", "")
+        if not task_id or not agent:
+            return ["command preview: complete required fields (task_id, agent)"]
+        return [f"$ {command_label(['orch-task', 'complete', task_id, agent, '--note', note])}"]
+
     def block_task(self):
-        task_id = self.prompt("Task id", self.selected_task_id())
-        agent = self.prompt("Agent id", self.selected_task_owner() or self.selected_agent_id())
-        reason = self.prompt("Reason", "")
+        values = self.run_form(
+            "Block Task",
+            [
+                FormField("task_id", "Task id", self.selected_task_id(), "task id", True),
+                FormField("agent", "Agent id", self.selected_task_owner() or self.selected_agent_id(), "task owner", True),
+                FormField("reason", "Reason", "", "required block reason", True),
+            ],
+            self.block_task_preview_lines,
+        )
+        if values is None:
+            self.message = "block task cancelled"
+            return
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        reason = values.get("reason", "")
         if task_id and agent and reason:
             self.run_cmd(["orch-task", "block", task_id, agent, "--reason", reason])
 
+    @staticmethod
+    def block_task_preview_lines(values: dict[str, str]) -> list[str]:
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        reason = values.get("reason", "")
+        if not task_id or not agent or not reason:
+            return ["command preview: complete required fields (task_id, agent, reason)"]
+        return [f"$ {command_label(['orch-task', 'block', task_id, agent, '--reason', reason])}"]
+
     def unblock_task(self):
-        task_id = self.prompt("Task id", self.selected_task_id())
-        agent = self.prompt("Agent id", self.selected_task_owner() or self.selected_agent_id())
-        note = self.prompt("Note (optional)", "")
+        values = self.run_form(
+            "Unblock Task",
+            [
+                FormField("task_id", "Task id", self.selected_task_id(), "task id", True),
+                FormField("agent", "Agent id", self.selected_task_owner() or self.selected_agent_id(), "task owner", True),
+                FormField("note", "Note (optional)", "", "optional note"),
+            ],
+            self.unblock_task_preview_lines,
+        )
+        if values is None:
+            self.message = "unblock task cancelled"
+            return
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        note = values.get("note", "")
         if task_id and agent:
             self.run_cmd(["orch-task", "unblock", task_id, agent, "--note", note])
 
+    @staticmethod
+    def unblock_task_preview_lines(values: dict[str, str]) -> list[str]:
+        task_id = values.get("task_id", "")
+        agent = values.get("agent", "")
+        note = values.get("note", "")
+        if not task_id or not agent:
+            return ["command preview: complete required fields (task_id, agent)"]
+        return [f"$ {command_label(['orch-task', 'unblock', task_id, agent, '--note', note])}"]
+
     def available_for_agent(self):
-        agent = self.prompt("Agent id", self.selected_agent_id())
+        values = self.run_form(
+            "Available for agent",
+            [FormField("agent", "Agent id", self.selected_agent_id(), "agent id", True)],
+            self.available_for_agent_preview_lines,
+        )
+        if values is None:
+            self.message = "available-for-agent cancelled"
+            return
+        agent = values.get("agent", "")
         if agent:
             self.run_cmd(["orch-task", "list-available", "--for", agent])
+
+    @staticmethod
+    def available_for_agent_preview_lines(values: dict[str, str]) -> list[str]:
+        agent = values.get("agent", "")
+        if not agent:
+            return ["command preview: complete required fields (agent)"]
+        return [f"$ {command_label(['orch-task', 'list-available', '--for', agent])}"]
 
     def selected_agent_id(self) -> str:
         state = self.state()
